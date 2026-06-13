@@ -1,664 +1,835 @@
 import { useState, useEffect } from 'react';
-import { format, parseISO, addHours, differenceInCalendarDays } from 'date-fns';
+import { format, differenceInDays, addDays } from 'date-fns';
+import * as XLSX from 'xlsx';
+
+const formatRp = (angka) => {
+  return Number(angka || 0).toLocaleString('id-ID');
+};
 
 const toTitleCase = (str) => {
+  if (!str) return '';
   return str.toLowerCase().replace(/\b\w/g, s => s.toUpperCase());
 };
 
-// Helper untuk format rupiah
-const formatRp = (angka) => {
-  return (angka || 0).toLocaleString('id-ID');
-};
-
 export default function RiwayatTransaksi() {
-  const [loading, setLoading] = useState(true);
-  const [riwayatHarian, setRiwayatHarian] = useState([]);
-  const [riwayatKos, setRiwayatKos] = useState([]);
+  const [transactions, setTransactions] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [dateFilter, setDateFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('Semua');
 
-const [editingRalat, setEditingRalat] = useState(null);
-  const [targetCO, setTargetCO] = useState(null);
+  // STATE UNTUK SORTING TABEL (Default: Waktu Masuk, Terbaru ke Terlama)
+  const [sortConfig, setSortConfig] = useState({ key: 'waktuMasuk', direction: 'desc' });
+
+  // PRINT STATE
   const [printData, setPrintData] = useState(null);
-
-  // STATE BARU: Laporan Shift (End of Day)
-  const [isRekapOpen, setIsRekapOpen] = useState(false);
-  const [rekapDate, setRekapDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-
-  // LOGIKA: Kalkulasi Rekap Hari Ini
-  const getRekapData = () => {
-    let totalPendapatan = 0; let totalDeposit = 0; let tamuCount = 0;
-    const metodePendapatan = {}; const metodeDeposit = {};
-
-    const prosesTransaksi = (tx) => {
-      // Membaca transaksi yang diinput pada tanggal yang dipilih
-      if (!tx.waktuInput.startsWith(rekapDate)) return;
-      tamuCount++;
-
-      // KALKULASI KAMAR (SUPPORT MULTI-PAYMENT)
-      if (tx.pembayaran?.detailMetodeKamar && tx.pembayaran.detailMetodeKamar.length > 0) {
-        tx.pembayaran.detailMetodeKamar.forEach(m => {
-          totalPendapatan += m.nominal;
-          metodePendapatan[m.metode] = (metodePendapatan[m.metode] || 0) + m.nominal;
-        });
-      } else {
-        const hrgKamar = tx.pembayaran?.jumlahKamar || 0;
-        const bayarKamar = tx.pembayaran?.metodeKamar || 'Lainnya';
-        totalPendapatan += hrgKamar;
-        metodePendapatan[bayarKamar] = (metodePendapatan[bayarKamar] || 0) + hrgKamar;
-      }
-
-      // Kalkulasi Tambahan
-      (tx.pembayaran?.tambahan || []).forEach(t => {
-        totalPendapatan += t.jumlah;
-        metodePendapatan[t.metode] = (metodePendapatan[t.metode] || 0) + t.jumlah;
-      });
-
-      // Kalkulasi Deposit
-      const hrgDep = tx.pembayaran?.jumlahDeposit || 0;
-      const bayarDep = tx.pembayaran?.metodeDeposit || 'Lainnya';
-      totalDeposit += hrgDep;
-      metodeDeposit[bayarDep] = (metodeDeposit[bayarDep] || 0) + hrgDep;
-    };
-
-    riwayatHarian.forEach(prosesTransaksi);
-    riwayatKos.forEach(prosesTransaksi);
-
-    return { totalPendapatan, totalDeposit, tamuCount, metodePendapatan, metodeDeposit };
-  };
-  const rekap = getRekapData();
-
-  const [editForm, setEditForm] = useState({});
+  
+  // EDIT/RALAT STATE
+  const [editModal, setEditModal] = useState({ isOpen: false, data: null });
+  const [editDurasiMalam, setEditDurasiMalam] = useState(1);
+  const [editWaktuKeluar, setEditWaktuKeluar] = useState('');
+  const [editNoKamar, setEditNoKamar] = useState('');
+  const [editStatusDeposit, setEditStatusDeposit] = useState('');
+  const [editInfo, setEditInfo] = useState('');
+  const [editJenisKelamin, setEditJenisKelamin] = useState(''); 
   const [isSaving, setIsSaving] = useState(false);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  const [floors, setFloors] = useState([]);
-  const [occupiedRooms, setOccupiedRooms] = useState([]);
-  const [isRoomModalOpen, setIsRoomModalOpen] = useState(false);
+  // DASHBOARD FINANSIAL STATE
+  const [isFinancialModalOpen, setIsFinancialModalOpen] = useState(false);
+  const [finData, setFinData] = useState([]);
+  const [pendapatanBulanIni, setPendapatanBulanIni] = useState(0);
+
+  // Load Data
+  const fetchData = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/data');
+      if (res.ok) {
+        const data = await res.json();
+        const harian = (data.dailyTransactions || []).map(tx => ({ ...tx, type: 'harian' }));
+        const kos = (data.activeKost || []).map(k => ({ ...k, type: 'kos' }));
+        
+        const allTx = [...harian, ...kos];
+        setTransactions(allTx);
+      }
+    } catch (error) {
+      console.error("Gagal mengambil data transaksi:", error);
+    }
+  };
 
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      try {
-        const res = await fetch('http://localhost:5000/api/data');
-        if (!res.ok) throw new Error("Gagal memuat data");
-        const data = await res.json();
-        
-        setRiwayatHarian((data.dailyTransactions || []).sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput)));
-        setRiwayatKos((data.activeKost || []).sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput)));
+    const timer = setTimeout(() => {
+      fetchData();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
 
-        const s = data.settings || {};
-        setFloors(s.floors || []);
-
-        const occ = [];
-        const sekarang = new Date();
-        (data.dailyTransactions || []).forEach(tx => {
-          if (tx.checkOut && sekarang <= new Date(tx.checkOut)) occ.push(tx.noKamar.toString().trim());
-        });
-        (data.activeKost || []).forEach(kos => {
-          if (kos.periodeEnd) {
-             const end = new Date(kos.periodeEnd); end.setHours(12,0,0,0);
-             if (sekarang <= end) occ.push(kos.roomNumber.toString().trim());
-          }
-        });
-        setOccupiedRooms(occ);
-      } catch (error) { console.error("Gagal mengambil riwayat:", error); } finally { setLoading(false); }
-    };
-    loadData();
-  }, [refreshTrigger]);
-
-  const getStatusAndActions = (checkOutDate) => {
-    if (!checkOutDate) return { text: 'Unknown', color: 'bg-gray-200 text-gray-700', canRalat: true, canCO: true };
-    const sekarang = new Date();
-    const co = new Date(checkOutDate);
-    
-    if (sekarang <= co) return { text: 'Aktif In-House', color: 'bg-green-100 text-green-800 border-green-300', canRalat: true, canCO: true };
-    
-    const batasBisaEdit = addHours(co, 1);
-    if (sekarang <= batasBisaEdit) return { text: 'Selesai (Masa Ralat)', color: 'bg-yellow-100 text-yellow-800 border-yellow-300', canRalat: true, canCO: false };
-    
-    return { text: 'Selesai (Terkunci)', color: 'bg-gray-100 text-gray-600 border-gray-300', canRalat: false, canCO: false };
+  // LOGIKA SORTING (Pengurutan Dinamis + Secondary Sort Cerdas)
+  const requestSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
   };
 
-  const openRalatModal = (item, type) => {
-    setEditingRalat({ ...item, type }); 
-    setEditForm({ ...item, tipeKamar: type === 'harian' ? item.tipeKamar : item.roomType }); 
+  const getSortIndicator = (key) => {
+    if (sortConfig.key !== key) return '↕️';
+    return sortConfig.direction === 'asc' ? '⬆️' : '⬇️';
   };
 
-  const handleSimpanRalat = async () => {
-    setIsSaving(true);
+  // LOGIKA DASHBOARD FINANSIAL
+  const openFinancialModal = async () => {
     try {
       const res = await fetch('http://localhost:5000/api/data');
-      const dbData = await res.json();
-
-      if (editingRalat.type === 'harian') {
-        const index = dbData.dailyTransactions.findIndex(tx => tx.id === editingRalat.id);
-        if (index !== -1) dbData.dailyTransactions[index] = { ...dbData.dailyTransactions[index], ...editForm };
-      } else {
-        const index = dbData.activeKost.findIndex(kos => kos.id === editingRalat.id);
-        if (index !== -1) dbData.activeKost[index] = { ...dbData.activeKost[index], ...editForm, roomType: editForm.tipeKamar || editForm.roomType };
-      }
-
-      const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-      const result = await postRes.json();
-      if (result.success) { setEditingRalat(null); setRefreshTrigger(prev => prev + 1); } 
-      else { alert("Gagal menyimpan ralat: " + result.error); }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
-  };
-
-  const executeCOInstan = async (statusDep) => {
-    setIsSaving(true);
-    try {
-      const res = await fetch('http://localhost:5000/api/data');
-      const dbData = await res.json();
-      const nowStrHarian = format(new Date(), "yyyy-MM-dd'T'HH:mm");
-      // REVISI: Ubah agar C/O Instan Kos juga merekam jam (mendekati gaya Harian) agar bisa dibaca langsung selesai.
-      const nowStrKos = format(new Date(), "yyyy-MM-dd'T'HH:mm");
-
-      if (targetCO.type === 'harian') {
-        const index = dbData.dailyTransactions.findIndex(tx => tx.id === targetCO.id);
-        if (index !== -1) {
-          dbData.dailyTransactions[index].checkOut = nowStrHarian;
-          dbData.dailyTransactions[index].statusDeposit = statusDep;
-        }
-      } else {
-        const index = dbData.activeKost.findIndex(kos => kos.id === targetCO.id);
-        if (index !== -1) {
-          dbData.activeKost[index].periodeEnd = nowStrKos;
-          dbData.activeKost[index].statusDeposit = statusDep;
-        }
-      }
-
-      const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-      const result = await postRes.json();
+      if (!res.ok) throw new Error("Gagal mengambil data");
+      const data = await res.json();
       
-      if (result.success) { setTargetCO(null); setRefreshTrigger(prev => prev + 1); } 
-      else { alert("Gagal C/O: " + result.error); }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+      const harian = (data.dailyTransactions || []).map(tx => ({ ...tx, type: 'harian' }));
+      const kos = (data.activeKost || []).map(k => ({ ...k, type: 'kos' }));
+      const allTx = [...harian, ...kos];
+      
+      setFinData(allTx);
+      
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      
+      const total = allTx.filter(tx => {
+        const txDate = new Date(tx.waktuInput);
+        return txDate.getMonth() === currentMonth && txDate.getFullYear() === currentYear;
+      }).reduce((sum, tx) => {
+        const sewa = tx.pembayaran?.jumlahKamar || 0;
+        const tambahan = (tx.pembayaran?.tambahan || []).reduce((acc, curr) => acc + (curr.jumlah || 0), 0);
+        return sum + sewa + tambahan;
+      }, 0);
+      
+      setPendapatanBulanIni(total);
+      setIsFinancialModalOpen(true);
+    } catch (err) {
+      console.error("Error Dasbor Finansial:", err);
+      alert("Gagal memuat data keuangan.");
+    }
   };
 
-  const handleSelectRoom = (kamarNo, kamarTipe) => {
-    if (editingRalat.type === 'harian') setEditForm({...editForm, noKamar: kamarNo, tipeKamar: kamarTipe});
-    else setEditForm({...editForm, roomNumber: kamarNo, tipeKamar: kamarTipe});
-    setIsRoomModalOpen(false);
-  };
+  const handleExportExcel = () => {
+    // Export data diurutkan dari yang terbaru
+    const sortedData = [...finData].sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput));
 
-  const filteredHarian = riwayatHarian.filter(tx => (tx.nama && tx.nama.toLowerCase().includes(searchTerm.toLowerCase())) || (tx.noKamar && tx.noKamar.toString().toLowerCase().includes(searchTerm.toLowerCase())));
-  const filteredKos = riwayatKos.filter(kos => (kos.nama && kos.nama.toLowerCase().includes(searchTerm.toLowerCase())) || (kos.roomNumber && kos.roomNumber.toString().toLowerCase().includes(searchTerm.toLowerCase())));
+    const rows = sortedData.map(tx => {
+      const total = (tx.pembayaran?.jumlahKamar || 0) + (tx.pembayaran?.tambahan || []).reduce((sum, item) => sum + item.jumlah, 0);
+      
+      let wMasuk, wKeluar;
+      if (tx.type === 'harian') {
+        wMasuk = new Date(tx.checkIn);
+        wKeluar = new Date(tx.checkOut);
+      } else {
+        wMasuk = new Date(tx.periodeStart);
+        wKeluar = new Date((tx.periodeEnd || format(new Date(), 'yyyy-MM-dd')) + 'T12:00:00');
+      }
 
-  // Helper Komputasi Struk
-  const getJumlahMalam = (start, end, type) => {
-    if (!start || !end) return '1 Malam';
-    if (type === 'transit') return '6 Jam';
-    if (type === 'kos') return '1 Bulan';
-    
-    const startDate = new Date(start);
-    const endDate = new Date(end);
+      const isValidMasuk = !isNaN(wMasuk);
+      const isValidKeluar = !isNaN(wKeluar);
 
-    let numDays = differenceInCalendarDays(endDate, startDate);
+      const tglMasuk = isValidMasuk ? format(wMasuk, 'yyyy-MM-dd') : '-';
+      const jamMasuk = isValidMasuk ? format(wMasuk, 'HH:mm') : '-';
+      const tglKeluar = isValidKeluar ? format(wKeluar, 'yyyy-MM-dd') : '-';
+      const jamKeluar = isValidKeluar ? format(wKeluar, 'HH:mm') : '-';
 
-    // Koreksi Early Check-In: Masuk sebelum jam 12 siang memakan kuota malam sebelumnya
-    if (type === 'harian' && startDate.getHours() < 12) {
-      numDays += 1;
+      let bayarCash = 0;
+      let bayarQRIS = 0;
+      let bayarTransfer = 0;
+
+      if (tx.pembayaran?.detailMetodeKamar?.length > 0) {
+        tx.pembayaran.detailMetodeKamar.forEach(m => {
+          const met = m.metode.toLowerCase();
+          if (met.includes('cash')) bayarCash += m.nominal;
+          else if (met.includes('qris')) bayarQRIS += m.nominal;
+          else if (met.includes('transfer')) bayarTransfer += m.nominal;
+        });
+      } else {
+        const met = (tx.pembayaran?.metodeKamar || '').toLowerCase();
+        if (met.includes('cash')) bayarCash += total;
+        else if (met.includes('qris')) bayarQRIS += total;
+        else if (met.includes('transfer')) bayarTransfer += total;
+      }
+
+      const depositNominal = tx.pembayaran?.jumlahDeposit || 0;
+      const depositMetode = tx.pembayaran?.metodeDeposit || '-';
+
+      return {
+        'ID Transaksi': tx.id,
+        'Tipe': tx.tipeInap ? toTitleCase(tx.tipeInap) : (tx.type === 'kos' ? 'Kos' : 'Harian'),
+        'Nama Tamu': tx.nama,
+        'Jenis Kelamin': tx.jenisKelamin || '-',
+        'No. Kamar': tx.noKamar || tx.roomNumber,
+        'Tanggal Check In': tglMasuk,
+        'Jam Check In': jamMasuk,
+        'Tanggal Check Out': tglKeluar,
+        'Jam Check Out': jamKeluar,
+        'Total Tagihan (Rp)': total,
+        'Cash (Rp)': bayarCash > 0 ? bayarCash : '',
+        'QRIS (Rp)': bayarQRIS > 0 ? bayarQRIS : '',
+        'Transfer (Rp)': bayarTransfer > 0 ? bayarTransfer : '',
+        'Deposit (Rp)': depositNominal > 0 ? depositNominal : '',
+        'Metode Deposit': depositNominal > 0 ? depositMetode : '-'
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+
+    const objectMaxLength = [];
+    if (rows.length > 0) {
+      const keys = Object.keys(rows[0]);
+      for (let i = 0; i < keys.length; i++) {
+        let maxLen = keys[i].length; 
+        for (let j = 0; j < rows.length; j++) {
+          const val = rows[j][keys[i]];
+          if (val !== null && val !== undefined) {
+            const valLen = val.toString().length;
+            if (valLen > maxLen) {
+              maxLen = valLen; 
+            }
+          }
+        }
+        objectMaxLength.push({ wch: maxLen + 2 });
+      }
+      worksheet['!cols'] = objectMaxLength;
     }
 
-    return numDays > 0 ? `${numDays} Malam` : '1 Malam';
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Rekap Pendapatan");
+    
+    XLSX.writeFile(workbook, `Laporan_Keuangan_Greenhaus_${format(new Date(), 'yyyyMMdd')}.xlsx`);
   };
 
-  if (loading) return <div className="text-center p-10 text-gray-500 italic">Memuat riwayat transaksi...</div>;
+  // HANDLERS EDIT & PRINT
+  const handlePrint = (tx) => {
+    setPrintData(tx);
+    setTimeout(() => {
+      window.print();
+    }, 500);
+  };
+
+  const closePrint = () => {
+    setPrintData(null);
+  };
+
+  const handleEditClick = (tx) => {
+    setEditModal({ isOpen: true, data: tx });
+    
+    if (tx.type === 'harian') {
+      const ci = new Date(tx.checkIn);
+      const co = new Date(tx.checkOut);
+      let diff = differenceInDays(co, ci);
+      if (diff === 0 && tx.tipeInap !== 'transit') diff = 1;
+      setEditDurasiMalam(diff);
+      setEditWaktuKeluar(format(co, "yyyy-MM-dd'T'HH:mm"));
+      setEditNoKamar(tx.noKamar);
+      setEditStatusDeposit(tx.statusDeposit || 'Belum Refund');
+      setEditInfo(tx.info || '');
+      setEditJenisKelamin(tx.jenisKelamin || ''); 
+    } else {
+      setEditWaktuKeluar(format(new Date(tx.periodeEnd), 'yyyy-MM-dd'));
+      setEditNoKamar(tx.roomNumber);
+      setEditStatusDeposit(tx.statusDeposit || 'Belum Refund');
+      setEditInfo(tx.info || '');
+      setEditJenisKelamin(tx.jenisKelamin || ''); 
+    }
+  };
+
+  const hitungUlangKeluarHarian = (malam) => {
+    if (!editModal.data) return;
+    const dateMasuk = new Date(editModal.data.checkIn);
+    let dateKeluar;
+    if (dateMasuk.getHours() < 12) {
+      dateKeluar = addDays(dateMasuk, malam - 1);
+    } else {
+      dateKeluar = addDays(dateMasuk, malam);
+    }
+    dateKeluar.setHours(12, 0, 0, 0);
+    setEditWaktuKeluar(format(dateKeluar, "yyyy-MM-dd'T'HH:mm"));
+  };
+
+  const handleCheckoutInstan = () => {
+    if (editModal.data?.type === 'harian') {
+      setEditWaktuKeluar(format(new Date(), "yyyy-MM-dd'T'HH:mm"));
+    } else if (editModal.data?.type === 'kos') {
+      setEditWaktuKeluar(format(new Date(), 'yyyy-MM-dd'));
+    }
+  };
+
+  const simpanPerubahan = async () => {
+    if (!editWaktuKeluar || !editNoKamar) return alert("Mohon lengkapi Waktu Keluar dan Nomor Kamar.");
+    
+    setIsSaving(true);
+    try {
+      const getRes = await fetch('http://localhost:5000/api/data');
+      const dbData = await getRes.json();
+      const targetId = editModal.data.id;
+
+      let isUpdated = false;
+
+      if (editModal.data.type === 'harian') {
+        const index = (dbData.dailyTransactions || []).findIndex(t => t.id === targetId);
+        if (index !== -1) {
+          dbData.dailyTransactions[index].checkOut = editWaktuKeluar;
+          dbData.dailyTransactions[index].noKamar = editNoKamar;
+          dbData.dailyTransactions[index].statusDeposit = editStatusDeposit;
+          dbData.dailyTransactions[index].info = editInfo;
+          dbData.dailyTransactions[index].jenisKelamin = editJenisKelamin; 
+          isUpdated = true;
+        }
+      } else if (editModal.data.type === 'kos') {
+        const index = (dbData.activeKost || []).findIndex(t => t.id === targetId);
+        if (index !== -1) {
+          dbData.activeKost[index].periodeEnd = format(new Date(editWaktuKeluar), 'yyyy-MM-dd');
+          dbData.activeKost[index].roomNumber = editNoKamar;
+          dbData.activeKost[index].statusDeposit = editStatusDeposit;
+          dbData.activeKost[index].info = editInfo;
+          dbData.activeKost[index].jenisKelamin = editJenisKelamin; 
+          isUpdated = true;
+        }
+      }
+
+      if (!isUpdated) throw new Error("Data transaksi tidak ditemukan di database.");
+
+      const postRes = await fetch('http://localhost:5000/api/data/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dbData)
+      });
+      
+      const result = await postRes.json();
+      if (result.success) {
+        alert("Perubahan berhasil disimpan.");
+        setEditModal({ isOpen: false, data: null });
+        fetchData();
+      } else {
+        alert("Gagal menyimpan: " + result.error);
+      }
+    } catch (error) {
+      console.error(error);
+      alert("Terjadi kesalahan jaringan.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const hapusTransaksi = async (id, type) => {
+    if (!window.confirm("Yakin ingin menghapus transaksi ini? Tindakan ini tidak bisa dibatalkan dan akan mempengaruhi laporan kasir.")) return;
+    
+    try {
+      const getRes = await fetch('http://localhost:5000/api/data');
+      const dbData = await getRes.json();
+      
+      if (type === 'harian') {
+        dbData.dailyTransactions = dbData.dailyTransactions.filter(t => t.id !== id);
+      } else {
+        dbData.activeKost = dbData.activeKost.filter(t => t.id !== id);
+      }
+
+      const postRes = await fetch('http://localhost:5000/api/data/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dbData)
+      });
+      
+      if (postRes.ok) {
+        fetchData();
+      }
+    } catch (error) {
+      console.error("Error Hapus Transaksi:", error);
+      alert("Gagal menghapus data.");
+    }
+  };
+
+  // FILTERING DASAR (Pencarian & Tab Status)
+  const filteredTx = transactions.filter(tx => {
+    const safeNama = tx.nama || '';
+    const matchName = safeNama.toLowerCase().includes((searchTerm || '').toLowerCase());
+    const matchRoom = (tx.noKamar || tx.roomNumber || '').toString().includes(searchTerm || '');
+    const searchMatch = matchName || matchRoom;
+
+    let dateMatch = true;
+    if (dateFilter) {
+      try {
+        const txDate = tx.type === 'harian' ? new Date(tx.checkIn) : new Date(tx.periodeStart);
+        if (!isNaN(txDate)) {
+          dateMatch = format(txDate, 'yyyy-MM-dd') === dateFilter;
+        } else {
+          dateMatch = false;
+        }
+      } catch (e) {
+        console.error("Error Date Filter:", e);
+        dateMatch = false;
+      }
+    }
+
+    let statusMatch = true;
+    try {
+      const now = new Date();
+      let coDate;
+      if (tx.type === 'harian') {
+        coDate = new Date(tx.checkOut);
+      } else {
+        coDate = new Date((tx.periodeEnd || format(now, 'yyyy-MM-dd')) + 'T12:00:00');
+      }
+
+      if (!isNaN(coDate)) {
+        if (statusFilter === 'Aktif') statusMatch = now <= coDate;
+        else if (statusFilter === 'Selesai') statusMatch = now > coDate;
+      }
+    } catch (e) {
+      console.error("Error Status Filter:", e);
+      statusMatch = true;
+    }
+
+    return searchMatch && dateMatch && statusMatch;
+  });
+
+  // SORTING ENGINE DENGAN TIE-BREAKER (Secondary Sort)
+  const sortedAndFilteredTx = [...filteredTx].sort((a, b) => {
+    // Helper fungsi untuk mendapatkan waktu Check-In yang absolut
+    const getWaktuMasuk = (tx) => tx.type === 'harian' ? new Date(tx.checkIn).getTime() : new Date(tx.periodeStart).getTime();
+    const timeA = getWaktuMasuk(a) || 0;
+    const timeB = getWaktuMasuk(b) || 0;
+
+    let primaryComparison = 0;
+
+    // Evaluasi Primary Sort
+    if (sortConfig.key === 'nama') {
+      const nameA = (a.nama || '').toLowerCase();
+      const nameB = (b.nama || '').toLowerCase();
+      if (nameA < nameB) primaryComparison = -1;
+      if (nameA > nameB) primaryComparison = 1;
+    } else if (sortConfig.key === 'jenisKelamin') {
+      const jkA = a.jenisKelamin || '';
+      const jkB = b.jenisKelamin || '';
+      if (jkA < jkB) primaryComparison = -1;
+      if (jkA > jkB) primaryComparison = 1;
+    } else if (sortConfig.key === 'tipe') {
+      const typeA = a.type === 'kos' ? 'kos' : a.tipeInap || '';
+      const typeB = b.type === 'kos' ? 'kos' : b.tipeInap || '';
+      if (typeA < typeB) primaryComparison = -1;
+      if (typeA > typeB) primaryComparison = 1;
+    } else if (sortConfig.key === 'status') {
+      const now = new Date().getTime();
+      const getWaktuKeluar = (tx) => tx.type === 'harian' ? new Date(tx.checkOut).getTime() : new Date(tx.periodeEnd + 'T12:00:00').getTime();
+      const isAktifA = now <= getWaktuKeluar(a) ? 1 : 0;
+      const isAktifB = now <= getWaktuKeluar(b) ? 1 : 0;
+      primaryComparison = isAktifB - isAktifA; // Aktif (1) di atas Selesai (0)
+    } else if (sortConfig.key === 'waktuMasuk') {
+      primaryComparison = timeA - timeB;
+    }
+
+    // Jika hasil Primary Sort tidak seri, kembalikan arahnya
+    if (primaryComparison !== 0) {
+      return sortConfig.direction === 'asc' ? primaryComparison : -primaryComparison;
+    }
+
+    // SECONDARY SORT (Tie-Breaker): Jika nilainya kembar, selalu urutkan dari yang paling BARU masuk (Descending Time)
+    return timeB - timeA;
+  });
 
   return (
-    <div className="space-y-6 animate-fade-in pb-10">
-      
-      {/* BAGIAN UI UTAMA FO (Dihilangkan/Disembunyikan saat sedang Print Layout) */}
-      <div className="print:hidden space-y-6">
-        <div className="bg-white p-4 rounded-md shadow-sm border border-gray-200 flex flex-col md:flex-row justify-between items-center gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800">🏨 Riwayat & Kontrol Transaksi</h2>
-            <p className="text-sm text-gray-500">Pusat kontrol Checkout Instan, Ralat Inap, dan Cetak Struk.</p>
-          </div>
-          <div className="w-full md:w-auto flex gap-3">
-            <button onClick={() => setIsRekapOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-bold shadow-sm transition-all active:scale-95 flex items-center gap-2 whitespace-nowrap">
-              <span className="text-lg">📊</span> Laporan Shift
-            </button>
-            <input type="text" placeholder="🔍 Cari nama atau kamar..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full md:w-64 border border-gray-300 rounded-lg p-2.5 bg-gray-50 focus:ring-2 focus:ring-green-500 outline-none" />
-          </div>
+    <div className="space-y-6 text-gray-900 transition-colors duration-300">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">Riwayat Transaksi</h2>
+          <p className="text-sm text-gray-500 mt-1">Daftar histori inap tamu Harian, Transit, dan Kos.</p>
         </div>
+        
+        <button onClick={openFinancialModal} className="bg-purple-600 hover:bg-purple-700 text-white px-5 py-2.5 rounded-lg font-bold shadow-md transition-colors flex items-center gap-2">
+          <span>📈</span> Laporan Finansial
+        </button>
+      </div>
 
-        {/* TABEL HARIAN */}
-        <div className="bg-white rounded-md shadow-sm border border-gray-200 overflow-hidden">
-          <div className="bg-green-50 p-3 border-b border-green-100"><h3 className="font-bold text-green-900">Transaksi Harian & Transit ({filteredHarian.length})</h3></div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-gray-50 text-gray-600 border-b border-gray-200">
-                <tr><th className="p-3 font-semibold w-1/4">Tamu & Kamar</th><th className="p-3 font-semibold">Check-In</th><th className="p-3 font-semibold">Check-Out</th><th className="p-3 font-semibold text-center">Status</th><th className="p-3 font-semibold text-center w-36">Tindakan FO</th></tr>
-              </thead>
-              <tbody>
-                {filteredHarian.length === 0 ? (<tr><td colSpan="5" className="p-4 text-center text-gray-500 italic">Data tidak ditemukan.</td></tr>) : (
-                  filteredHarian.map((tx) => {
-                    const status = getStatusAndActions(tx.checkOut);
-                    return (
-                      <tr key={tx.id} className="border-b border-gray-100 hover:bg-green-50/30 transition-colors">
-                        <td className="p-3"><div className="font-bold text-gray-800 text-base">{tx.nama}</div><div className="text-sm text-gray-600">Kamar <span className="font-bold text-green-600">#{tx.noKamar}</span></div></td>
-                        <td className="p-3"><div className="font-medium text-gray-700">{tx.checkIn ? format(parseISO(tx.checkIn), 'dd/MM/yyyy') : '-'}</div><div className="text-xs text-gray-500">{tx.checkIn ? format(parseISO(tx.checkIn), 'HH:mm') : '-'}</div></td>
-                        <td className="p-3"><div className="font-medium text-gray-700">{tx.checkOut ? format(parseISO(tx.checkOut), 'dd/MM/yyyy') : '-'}</div><div className="text-xs text-gray-500">{tx.checkOut ? format(parseISO(tx.checkOut), 'HH:mm') : '-'}</div></td>
-                        <td className="p-3 text-center"><span className={`px-2 py-1 border rounded-md text-xs font-bold ${status.color}`}>{status.text}</span></td>
-                        <td className="p-3">
-                          <div className="flex flex-col gap-2">
-                            <button onClick={() => setPrintData({...tx, type: 'harian'})} className="bg-gray-800 hover:bg-black text-white w-full py-1.5 rounded text-sm font-bold shadow-sm transition-colors flex items-center justify-center gap-1"><span>🖨️</span> Cetak Struk</button>
-                            {status.canRalat && <button onClick={() => openRalatModal(tx, 'harian')} className="bg-orange-100 hover:bg-orange-200 text-orange-700 w-full py-1.5 rounded text-sm font-bold transition-colors border border-orange-300 flex items-center justify-center gap-1"><span>⚙️</span> Ralat Kamar</button>}
-                            {status.canCO && <button onClick={() => setTargetCO({...tx, type: 'harian'})} className="bg-red-500 hover:bg-red-600 text-white w-full py-1.5 rounded text-sm font-bold shadow transition-colors flex items-center justify-center gap-1"><span>🏃</span> C/O Instan</button>}
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+      {/* FILTER BAR */}
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col md:flex-row gap-4">
+        <div className="flex-1">
+          <input 
+            type="text" 
+            placeholder="Cari nama tamu atau no. kamar..." 
+            value={searchTerm} 
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500"
+          />
         </div>
-
-        {/* TABEL KOS */}
-        <div className="bg-white rounded-md shadow-sm border border-gray-200 overflow-hidden">
-          <div className="bg-orange-50 p-3 border-b border-orange-100"><h3 className="font-bold text-orange-900">Transaksi Kos & Bulanan ({filteredKos.length})</h3></div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-gray-50 text-gray-600 border-b border-gray-200">
-                <tr><th className="p-3 font-semibold w-1/4">Tamu & Kamar</th><th className="p-3 font-semibold">Mulai Sewa</th><th className="p-3 font-semibold">Batas Sewa (12:00)</th><th className="p-3 font-semibold text-center">Status</th><th className="p-3 font-semibold text-center w-36">Tindakan FO</th></tr>
-              </thead>
-              <tbody>
-                {filteredKos.length === 0 ? (<tr><td colSpan="5" className="p-4 text-center text-gray-500 italic">Data tidak ditemukan.</td></tr>) : (
-                  filteredKos.map((kos) => {
-                    // REVISI LOGIKA CO INSTAN KOS: Jika string panjang (ada 'T'), dia sudah C/O paksa, baca jamnya langsung. 
-                    // Jika string pendek (hanya tgl), dia masih normal, tambahkan jam 12:00.
-                    let checkOutKos = null;
-                    if (kos.periodeEnd) { 
-                      checkOutKos = new Date(kos.periodeEnd); 
-                      if (!kos.periodeEnd.includes('T')) { checkOutKos.setHours(12, 0, 0, 0); }
-                    }
-                    const status = getStatusAndActions(checkOutKos);
-                    return (
-                      <tr key={kos.id} className="border-b border-gray-100 hover:bg-orange-50/30 transition-colors">
-                        <td className="p-3"><div className="font-bold text-gray-800 text-base">{kos.nama}</div><div className="text-sm text-gray-600">Kamar <span className="font-bold text-orange-600">#{kos.roomNumber}</span></div></td>
-                        <td className="p-3"><div className="font-medium text-gray-700">{kos.periodeStart ? format(new Date(kos.periodeStart), 'dd/MM/yyyy') : '-'}</div></td>
-                        <td className="p-3"><div className="font-medium text-gray-700">{kos.periodeEnd ? format(new Date(kos.periodeEnd), 'dd/MM/yyyy') : '-'}</div></td>
-                        <td className="p-3 text-center"><span className={`px-2 py-1 border rounded-md text-xs font-bold ${status.color}`}>{status.text}</span></td>
-                        <td className="p-3">
-                          <div className="flex flex-col gap-2">
-                            <button onClick={() => setPrintData({...kos, type: 'kos'})} className="bg-gray-800 hover:bg-black text-white w-full py-1.5 rounded text-sm font-bold shadow-sm transition-colors flex items-center justify-center gap-1"><span>🖨️</span> Cetak Struk</button>
-                            {status.canRalat && <button onClick={() => openRalatModal(kos, 'kos')} className="bg-orange-100 hover:bg-orange-200 text-orange-700 w-full py-1.5 rounded text-sm font-bold transition-colors border border-orange-300 flex items-center justify-center gap-1"><span>⚙️</span> Ralat Kamar</button>}
-                            {status.canCO && <button onClick={() => setTargetCO({...kos, type: 'kos'})} className="bg-red-500 hover:bg-red-600 text-white w-full py-1.5 rounded text-sm font-bold shadow transition-colors flex items-center justify-center gap-1"><span>🏃</span> C/O Instan</button>}
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+        <div className="w-full md:w-48">
+          <input 
+            type="date" 
+            value={dateFilter} 
+            onChange={(e) => setDateFilter(e.target.value)}
+            className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500"
+          />
+        </div>
+        <div className="w-full md:w-48">
+          <select 
+            value={statusFilter} 
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500"
+          >
+            <option value="Semua">Semua Status</option>
+            <option value="Aktif">Tamu Aktif (In-House)</option>
+            <option value="Selesai">Sudah Check-Out</option>
+          </select>
         </div>
       </div>
 
-      {/* POPUP: MODAL RALAT INAP & DEPOSIT */}
-      {editingRalat && (
-        <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4 animate-fade-in print:hidden">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
-            <div className="p-5 bg-orange-600 text-white flex justify-between items-center">
-              <h3 className="font-bold text-lg">⚙️ Ralat Transaksi Inap</h3>
-              <button onClick={() => setEditingRalat(null)} className="text-orange-200 hover:text-white font-bold text-2xl">&times;</button>
+      {/* TABEL DATA */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {/* HEADER 1: Tamu & Gender */}
+                <th className="p-3">
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => requestSort('nama')} className="flex items-center gap-1 font-bold text-sm text-gray-700 hover:text-green-600 transition-colors">
+                      Nama Tamu <span className="opacity-70 text-xs">{getSortIndicator('nama')}</span>
+                    </button>
+                    <span className="text-gray-300">|</span>
+                    <button onClick={() => requestSort('jenisKelamin')} className="flex items-center gap-1 font-bold text-xs text-gray-500 hover:text-green-600 transition-colors">
+                      Gender <span className="opacity-70">{getSortIndicator('jenisKelamin')}</span>
+                    </button>
+                  </div>
+                </th>
+                
+                {/* HEADER 2: Tipe */}
+                <th className="p-3">
+                  <button onClick={() => requestSort('tipe')} className="flex items-center gap-1 font-bold text-sm text-gray-700 hover:text-green-600 transition-colors">
+                    Tipe & Durasi <span className="opacity-70 text-xs">{getSortIndicator('tipe')}</span>
+                  </button>
+                </th>
+
+                {/* HEADER 3: Waktu Masuk */}
+                <th className="p-3">
+                  <button onClick={() => requestSort('waktuMasuk')} className="flex items-center gap-1 font-bold text-sm text-gray-700 hover:text-green-600 transition-colors">
+                    Waktu (Masuk - Keluar) <span className="opacity-70 text-xs">{getSortIndicator('waktuMasuk')}</span>
+                  </button>
+                </th>
+
+                {/* HEADER 4: Status */}
+                <th className="p-3">
+                  <button onClick={() => requestSort('status')} className="flex items-center gap-1 font-bold text-sm text-gray-700 hover:text-green-600 transition-colors">
+                    Status <span className="opacity-70 text-xs">{getSortIndicator('status')}</span>
+                  </button>
+                </th>
+
+                <th className="p-3 font-bold text-sm text-gray-700 text-center">Aksi</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {sortedAndFilteredTx.length === 0 ? (
+                <tr>
+                  <td colSpan="5" className="p-8 text-center text-gray-500 italic">Tidak ada data transaksi yang sesuai.</td>
+                </tr>
+              ) : (
+                sortedAndFilteredTx.map(tx => {
+                  const noKamar = tx.type === 'harian' ? tx.noKamar : tx.roomNumber;
+                  const wMasuk = tx.type === 'harian' ? new Date(tx.checkIn) : new Date(tx.periodeStart);
+                  const wKeluar = tx.type === 'harian' ? new Date(tx.checkOut) : new Date(tx.periodeEnd + 'T12:00:00');
+                  
+                  const now = new Date();
+                  const isAktif = now <= wKeluar;
+                  
+                  return (
+                    <tr key={tx.id} className="hover:bg-green-50/30 transition-colors">
+                      <td className="p-4">
+                        <div className="font-bold text-gray-800">
+                          {tx.nama} {tx.jenisKelamin === 'Laki-laki' ? '♂️' : tx.jenisKelamin === 'Perempuan' ? '♀️' : tx.jenisKelamin === 'Lain-lain' ? '⚪' : ''}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">Kamar <span className="font-bold text-green-700">#{noKamar}</span></div>
+                      </td>
+                      <td className="p-4">
+                        <span className={`inline-block px-2.5 py-1 rounded text-xs font-bold uppercase tracking-wider ${tx.type === 'kos' ? 'bg-orange-100 text-orange-800' : tx.tipeInap === 'transit' ? 'bg-purple-100 text-purple-800' : 'bg-green-100 text-green-800'}`}>
+                          {tx.type === 'kos' ? 'Kos Bulanan' : tx.tipeInap === 'transit' ? 'Transit' : 'Harian'}
+                        </span>
+                      </td>
+                      <td className="p-4">
+                        <div className="text-sm text-gray-600">
+                          <span className="text-green-600 font-bold">IN:</span> {isNaN(wMasuk) ? '-' : format(wMasuk, tx.tipeInap === 'transit' ? 'dd MMM yy, HH:mm' : 'dd MMM yy')}
+                        </div>
+                        <div className="text-sm text-gray-600 mt-1">
+                          <span className="text-red-500 font-bold">OUT:</span> {isNaN(wKeluar) ? '-' : format(wKeluar, tx.tipeInap === 'transit' ? 'dd MMM yy, HH:mm' : 'dd MMM yy')}
+                        </div>
+                      </td>
+                      <td className="p-4">
+                        {isAktif ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full border border-green-200">
+                            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> In-House
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded-full border border-gray-200">
+                            C/O Selesai
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-4 text-center">
+                        <div className="flex justify-center gap-2">
+                          <button onClick={() => handlePrint(tx)} className="bg-gray-800 hover:bg-black text-white p-2 rounded shadow-sm transition-colors text-sm" title="Cetak Struk">🖨️</button>
+                          <button onClick={() => handleEditClick(tx)} className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded shadow-sm transition-colors text-sm" title="Ralat Transaksi">⚙️</button>
+                          <button onClick={() => hapusTransaksi(tx.id, tx.type)} className="bg-red-50 hover:bg-red-100 text-red-600 p-2 rounded transition-colors text-sm" title="Hapus Data">🗑️</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* MODAL EDIT / RALAT TRANSAKSI */}
+      {editModal.isOpen && editModal.data && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden animate-fade-in">
+            <div className="p-5 bg-[#1a4b1a] text-white flex justify-between items-center">
+              <h3 className="font-bold text-lg">⚙️ Ralat Data Transaksi</h3>
+              <button onClick={() => setEditModal({ isOpen: false, data: null })} className="text-white/70 hover:text-white font-bold text-2xl outline-none">&times;</button>
             </div>
-            <div className="p-6 space-y-5 bg-orange-50/30">
-              <div>
-                <label className="block text-sm font-bold text-orange-900 mb-1">Nomor Kamar (Ganti Kamar)</label>
-                <button type="button" onClick={() => setIsRoomModalOpen(true)} className="w-full text-left border border-orange-300 bg-white rounded p-3 text-sm font-bold flex justify-between hover:bg-orange-50 shadow-sm">
-                  <span className="text-orange-900">Kamar {editingRalat.type === 'harian' ? editForm.noKamar : editForm.roomNumber} ({editForm.tipeKamar?.split('-')[0].toUpperCase()})</span>
-                  <span className="text-lg">🔄</span>
-                </button>
+            
+            <div className="p-6 space-y-5 bg-gray-50/50">
+              <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200 text-xs text-yellow-800 mb-4 shadow-sm">
+                <strong>Perhatian:</strong> Perubahan di sini akan menimpa data yang sudah ada. Fitur ralat tagihan belum tersedia, sehingga menambah hari inap di sini belum mewajibkan pelunasan uang muka baru.
               </div>
-              <div>
-                <label className="block text-sm font-bold text-orange-900 mb-1">Ralat Batas Waktu Check-Out / Sewa</label>
-                {editingRalat.type === 'harian' ? (
-                  <input type="datetime-local" value={editForm.checkOut || ''} onChange={(e) => setEditForm({...editForm, checkOut: e.target.value})} className="w-full border border-orange-300 rounded p-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 shadow-sm"/>
-                ) : (
-                  <input type="date" value={editForm.periodeEnd || ''} onChange={(e) => setEditForm({...editForm, periodeEnd: e.target.value})} className="w-full border border-orange-300 rounded p-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 shadow-sm"/>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Nomor Kamar</label>
+                  <input type="text" value={editNoKamar} onChange={(e) => setEditNoKamar(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Jenis Kelamin</label>
+                  <select value={editJenisKelamin} onChange={(e) => setEditJenisKelamin(e.target.value)} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500">
+                    <option value="" disabled hidden>- Pilih -</option>
+                    <option value="Laki-laki">Laki-laki ♂️</option>
+                    <option value="Perempuan">Perempuan ♀️</option>
+                    <option value="Lain-lain">Lain-lain ⚪</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                {editModal.data.type === 'harian' && editModal.data.tipeInap !== 'transit' && (
+                  <div className="w-24">
+                    <label className="block text-sm font-bold text-gray-700 mb-1">Durasi</label>
+                    <input type="number" min="1" value={editDurasiMalam} onChange={(e) => { const v = parseInt(e.target.value) || 1; setEditDurasiMalam(v); hitungUlangKeluarHarian(v); }} className="w-full bg-transparent border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 text-center" />
+                  </div>
                 )}
-              </div>
-              <div className="bg-white p-4 rounded border border-orange-200 shadow-sm mt-4">
-                <label className="block text-sm font-bold text-gray-700 mb-2">Status Uang Deposit (Rp {((editForm.pembayaran?.jumlahDeposit) || 0).toLocaleString('id-ID')})</label>
-                <select value={editForm.statusDeposit || 'Belum Refund'} onChange={(e) => setEditForm({...editForm, statusDeposit: e.target.value})} className={`w-full border rounded p-3 text-sm font-bold outline-none focus:ring-2 focus:ring-orange-500 ${editForm.statusDeposit === 'Sudah Refund' ? 'bg-green-100 text-green-800' : editForm.statusDeposit === 'Hangus' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                  {!(new Date() > (editingRalat.type === 'harian' ? new Date(editForm.checkOut) : (() => { const d = new Date(editForm.periodeEnd); d.setHours(12, 0, 0, 0); return d; })())) && (
-                    <option value="Belum Refund">Belum Refund</option>
+                <div className="flex-1">
+                  <div className="flex justify-between items-end mb-1">
+                    <label className="block text-sm font-bold text-gray-700">Waktu Keluar (Check-Out)</label>
+                    <button onClick={handleCheckoutInstan} className="text-[10px] bg-red-100 text-red-700 px-2 py-1 rounded font-bold hover:bg-red-200">C/O Instan Sekarang</button>
+                  </div>
+                  {editModal.data.type === 'kos' ? (
+                    <input type="date" value={editWaktuKeluar} onChange={(e) => setEditWaktuKeluar(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" />
+                  ) : (
+                    <input type="datetime-local" value={editWaktuKeluar} onChange={(e) => setEditWaktuKeluar(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" />
                   )}
-                  <option value="Sudah Refund">Sudah Refund</option>
-                  <option value="Hangus">Hangus (Denda)</option>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Status Deposit Jaminan</label>
+                <select value={editStatusDeposit} onChange={(e) => setEditStatusDeposit(e.target.value)} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500">
+                  <option value="Belum Refund">Belum Refund (Di Tangan Kasir)</option>
+                  <option value="Sudah Dikembalikan">✅ Sudah Dikembalikan ke Tamu</option>
+                  <option value="Deposit Hangus">❌ Deposit Hangus (Denda/Kotor)</option>
                 </select>
               </div>
-            </div>
-            <div className="p-4 bg-white border-t flex justify-end gap-3">
-              <button onClick={() => setEditingRalat(null)} className="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 rounded font-bold text-sm border">Batal</button>
-              <button onClick={handleSimpanRalat} disabled={isSaving} className="px-6 py-2.5 bg-orange-600 hover:bg-orange-700 text-white rounded font-bold text-sm shadow-md">{isSaving ? 'Menyimpan...' : '💾 Simpan Ralat'}</button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* POPUP: VERIFIKASI CO INSTAN */}
-      {targetCO && (
-        <div className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4 animate-fade-in print:hidden">
-          <div className="bg-white rounded-lg shadow-2xl w-full max-w-sm overflow-hidden text-center">
-             <div className="bg-red-600 p-5"><h3 className="font-extrabold text-white text-xl">⚠️ CHECK-OUT INSTAN</h3></div>
-             <div className="p-6">
-                <p className="text-gray-800 font-bold text-lg mb-1">{targetCO.nama}</p>
-                <p className="text-sm text-gray-500 mb-6">Kamar #{targetCO.type === 'harian' ? targetCO.noKamar : targetCO.roomNumber} akan diselesaikan detik ini juga. Bagaimana nasib uang depositnya?</p>
-                <div className="space-y-3">
-                   <button onClick={() => executeCOInstan('Sudah Refund')} disabled={isSaving} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded shadow-sm border border-green-700 transition-colors text-sm">✅ Deposit Di-Refund</button>
-                   <button onClick={() => executeCOInstan('Hangus')} disabled={isSaving} className="w-full bg-gray-800 hover:bg-black text-white font-bold py-3 rounded shadow-sm border border-black transition-colors text-sm">🔥 Deposit Hangus / Denda</button>
-                   <button onClick={() => executeCOInstan('Belum Refund')} disabled={isSaving} className="w-full bg-yellow-100 hover:bg-yellow-200 text-yellow-800 font-bold py-3 rounded shadow-sm border border-yellow-300 transition-colors text-sm">⏳ Nanti Saja (Belum Refund)</button>
-                </div>
-                <button onClick={() => setTargetCO(null)} className="w-full mt-6 bg-gray-100 hover:bg-gray-200 text-gray-600 py-3 rounded font-bold transition-colors">Batalkan</button>
-             </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL KAMAR */}
-      {isRoomModalOpen && (
-        <div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4 animate-fade-in print:hidden">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[85vh]">
-            <div className="p-5 bg-gray-800 text-white flex justify-between items-center shrink-0">
-              <div><h3 className="font-bold text-lg">🛏️ Pindah Kamar</h3><p className="text-xs text-gray-300">Pilih kamar kosong (Hijau).</p></div>
-              <button onClick={() => setIsRoomModalOpen(false)} className="text-gray-400 hover:text-white font-bold text-3xl transition-colors">&times;</button>
-            </div>
-            <div className="overflow-y-auto p-6 flex-1 space-y-6 bg-gray-50">
-              {floors.length === 0 ? (
-                <div className="text-center text-gray-500 italic py-10">Belum ada denah kamar.</div>
-              ) : (
-                floors.map((floor) => (
-                  <div key={floor.id} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                    <h4 className="font-bold text-gray-700 mb-3 border-b border-gray-100 pb-2">{floor.nama}</h4>
-                    {floor.kamar.length === 0 ? (<p className="text-xs text-gray-400 italic">Tidak ada kamar.</p>) : (
-                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
-                        {floor.kamar.filter(k => k.no.trim() !== '').map((k) => {
-                          const currentRoom = editingRalat?.type === 'harian' ? editForm.noKamar : editForm.roomNumber;
-                          const isOccupied = occupiedRooms.includes(k.no.trim()) && k.no.trim() !== currentRoom;
-                          return (
-                            <button
-                              key={k.id}
-                              disabled={isOccupied}
-                              onClick={() => handleSelectRoom(k.no.trim(), k.tipe)}
-                              className={`p-3 rounded-lg border-2 flex flex-col items-center justify-center transition-all ${
-                                k.no.trim() === currentRoom ? 'bg-orange-100 border-orange-500 text-orange-800 shadow-md ring-2 ring-orange-300' 
-                                : isOccupied ? 'bg-red-50 border-red-200 text-red-400 cursor-not-allowed opacity-70' 
-                                : 'bg-green-50 border-green-400 text-green-700 hover:bg-green-100 hover:scale-105 shadow-sm cursor-pointer'
-                              }`}
-                            >
-                              <span className="text-xl font-black">{k.no}</span>
-                              <span className="text-[9px] font-bold uppercase mt-1 tracking-wider">{k.tipe.split('-')[0]}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* POPUP: MODAL LAPORAN SHIFT / END OF DAY */}
-      {isRekapOpen && (
-        <div className="fixed inset-0 z-[80] bg-black/70 flex items-center justify-center p-4 animate-fade-in print:hidden">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 bg-blue-700 text-white flex justify-between items-center shrink-0">
               <div>
-                <h3 className="font-bold text-xl">📊 Laporan Pendapatan Kasir</h3>
-                <p className="text-xs text-blue-200">Rekapitulasi total transaksi berdasarkan tanggal Check-In.</p>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Catatan Tambahan (Info)</label>
+                <input type="text" value={editInfo} onChange={(e) => setEditInfo(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" placeholder="Opsional..." />
               </div>
-              <button onClick={() => setIsRekapOpen(false)} className="text-blue-200 hover:text-white font-bold text-3xl transition-colors">&times;</button>
             </div>
-            
-            <div className="p-6 overflow-y-auto flex-1 bg-gray-50 space-y-6">
+
+            <div className="p-5 border-t border-gray-100 flex justify-end gap-3">
+              <button onClick={() => setEditModal({ isOpen: false, data: null })} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg font-bold hover:bg-gray-200">Batal</button>
+              <button onClick={simpanPerubahan} disabled={isSaving} className="px-6 py-2 bg-green-600 text-white rounded-lg font-bold hover:bg-green-700 shadow-sm disabled:opacity-50">
+                {isSaving ? 'Menyimpan...' : 'Simpan Perubahan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DASBOR FINANSIAL & EXPORT */}
+      {isFinancialModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden animate-fade-in">
+            <div className="p-5 bg-purple-700 text-white flex justify-between items-center">
+              <h3 className="font-bold text-lg">📈 Dasbor Analitik Keuangan</h3>
+              <button onClick={() => setIsFinancialModalOpen(false)} className="text-white/70 hover:text-white font-bold text-2xl outline-none">&times;</button>
+            </div>
+            <div className="p-6 space-y-6">
               
-              {/* Date Picker Header */}
-              <div className="flex flex-col sm:flex-row justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm gap-4">
-                <span className="font-bold text-gray-700">Pilih Tanggal Laporan :</span>
-                <div className="flex gap-2">
-                  <button onClick={() => setRekapDate(format(new Date(), 'yyyy-MM-dd'))} className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold transition-colors">Hari Ini</button>
-                  <input type="date" value={rekapDate} onChange={(e) => setRekapDate(e.target.value)} className="border border-blue-300 rounded-lg p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 font-bold text-blue-800 bg-blue-50" />
-                </div>
+              <div className="bg-purple-50 p-6 rounded-xl border border-purple-100 text-center shadow-inner">
+                <p className="text-sm font-bold text-purple-600 uppercase mb-2">Pendapatan Terakumulasi Bulan Ini</p>
+                <h4 className="text-4xl font-black text-purple-900">Rp {pendapatanBulanIni.toLocaleString('id-ID')}</h4>
+                <p className="text-xs text-purple-500 mt-3 font-medium">Termasuk biaya tambahan. Tidak mencakup uang muka deposit aktif.</p>
               </div>
-
-              {/* Highlight Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm border-l-4 border-l-blue-500">
-                  <p className="text-xs font-bold text-gray-500 uppercase">Kamar Terjual</p>
-                  <p className="text-2xl font-black text-blue-700 mt-1">{rekap.tamuCount} <span className="text-sm text-gray-500 font-medium">Tamu</span></p>
-                </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm border-l-4 border-l-green-500">
-                  <p className="text-xs font-bold text-gray-500 uppercase">Total Akomodasi (Milik Hotel)</p>
-                  <p className="text-2xl font-black text-green-700 mt-1">Rp {formatRp(rekap.totalPendapatan)}</p>
-                </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm border-l-4 border-l-orange-500">
-                  <p className="text-xs font-bold text-gray-500 uppercase">Total Deposit (Titipan)</p>
-                  <p className="text-2xl font-black text-orange-600 mt-1">Rp {formatRp(rekap.totalDeposit)}</p>
-                </div>
-              </div>
-
-              {/* Rincian Metode Pembayaran */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                
-                {/* Tabel Akomodasi */}
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="bg-green-100 p-3 border-b border-green-200"><h4 className="font-bold text-green-900 text-sm">💰 Metode Pembayaran Akomodasi</h4></div>
-                  <div className="p-4 space-y-3">
-                    {Object.keys(rekap.metodePendapatan).length === 0 ? <p className="text-sm text-gray-400 italic">Belum ada transaksi.</p> : (
-                      Object.entries(rekap.metodePendapatan).map(([metode, jumlah]) => (
-                        <div key={metode} className="flex justify-between items-center border-b border-dashed pb-2">
-                          <span className="font-bold text-gray-600">{metode}</span>
-                          <span className="font-black text-gray-800">Rp {formatRp(jumlah)}</span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                {/* Tabel Deposit */}
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div className="bg-orange-100 p-3 border-b border-orange-200"><h4 className="font-bold text-orange-900 text-sm">🛡️ Metode Penerimaan Deposit</h4></div>
-                  <div className="p-4 space-y-3">
-                    {Object.keys(rekap.metodeDeposit).length === 0 ? <p className="text-sm text-gray-400 italic">Belum ada deposit.</p> : (
-                      Object.entries(rekap.metodeDeposit).map(([metode, jumlah]) => (
-                        <div key={metode} className="flex justify-between items-center border-b border-dashed pb-2">
-                          <span className="font-bold text-gray-600">{metode}</span>
-                          <span className="font-black text-gray-800">Rp {formatRp(jumlah)}</span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-              </div>
-            </div>
-
-            <div className="p-5 bg-white border-t flex justify-end gap-3 shrink-0">
-              {/* Tombol Export (Mati sementara untuk fase selanjutnya) */}
-              <button disabled className="bg-gray-100 text-gray-400 px-5 py-2.5 rounded-lg font-bold text-sm cursor-not-allowed">📥 Export Excel (Segera)</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-    {/* POPUP PRINT PREVIEW SEKALIGUS KANVAS CETAK (Khusus Print) */}
-      {printData && (
-        
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-900/80 p-4 print:p-0 print:bg-white print:block print:relative print:z-auto">
-          
-          {/* Print Style Injector */}
-          <style>
-            {`
-              @media print {
-                /* Margin 0 untuk mematikan header/footer browser */
-                @page { size: A5 landscape; margin: 0; }
-                body { background: white; margin: 0; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                /* Mencegah tabel atau baris terbelah setengah saat pindah ke halaman 2 */
-                table { page-break-inside: auto; }
-                tr { page-break-inside: avoid; page-break-after: auto; }
-                .avoid-break { page-break-inside: avoid; }
-              }
-            `}
-          </style>
-
-          {/* REVISI: Menghapus print:h-[148mm] dan print:overflow-hidden agar BISA ke page 2 jika item > 4 */}
-          <div className="bg-white shadow-2xl w-full max-w-[210mm] max-h-[90vh] overflow-y-auto print:max-w-none print:h-auto print:shadow-none print:overflow-visible relative flex flex-col print:block">
-            
-            <div className="p-4 bg-gray-800 text-white flex justify-between items-center shrink-0 sticky top-0 z-10 print:hidden">
-              <div>
-                <h3 className="font-bold text-lg">🖨️ Print Preview (A5 Landscape)</h3>
-                <p className="text-xs text-gray-300">Pilih "Save as PDF" atau Printer LX-310 pada dialog cetak.</p>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => setPrintData(null)} className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm font-bold transition-colors">Tutup</button>
-                <button onClick={() => window.print()} className="px-5 py-2 bg-green-500 hover:bg-green-400 text-gray-900 rounded text-sm font-extrabold shadow transition-colors flex items-center gap-2">
-                  <span>🖨️</span> CETAK SEKARANG
+              
+              <div className="border-t border-gray-100 pt-4">
+                <p className="text-sm text-gray-600 mb-3 text-center">Ekspor seluruh data transaksi ke dalam format Excel (.xlsx) untuk audit dan rekap akuntansi.</p>
+                <button onClick={handleExportExcel} className="w-full bg-green-600 hover:bg-green-700 text-white font-extrabold py-3.5 rounded-xl shadow-lg transition-transform active:scale-[0.98] flex items-center justify-center gap-2">
+                  <span className="text-xl">📊</span> DOWNLOAD LAPORAN EXCEL (.XLSX)
                 </button>
               </div>
+
             </div>
+          </div>
+        </div>
+      )}
 
-            {/* KANVAS STRUK - Padding print:p-6 (sekitar 1.5cm) sebagai ruang aman dari tepi pinggir mesin dot matrix */}
-            <div className="p-6 sm:p-8 print:p-6 text-gray-800 print:text-black font-sans bg-white box-border" id="print-area">
+      {/* PRINT AREA A5 LANDSCAPE OPTIMIZED */}
+      {printData && (
+        <div className="fixed inset-0 z-[100] bg-white text-black print:block overflow-hidden flex flex-col">
+          <div className="bg-gray-800 text-white p-4 flex justify-between items-center print:hidden shrink-0">
+            <div>
+              <h2 className="font-bold">Preview Struk Kuitansi</h2>
+              <p className="text-xs text-gray-400">Gunakan kertas A5 Landscape. Pastikan opsi "Headers and Footers" dimatikan di setelan printer browser.</p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={closePrint} className="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded font-bold">Batal (Tutup)</button>
+              <button onClick={() => window.print()} className="bg-green-600 hover:bg-green-500 px-4 py-2 rounded font-bold flex items-center gap-2"><span>🖨️</span> Cetak Sekarang</button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-auto bg-gray-100 print:bg-white print:overflow-visible flex justify-center p-4 print:p-0">
+            <div className="bg-white w-full max-w-[210mm] print:w-auto min-h-[148mm] print:min-h-0 print:h-auto shadow-2xl print:shadow-none mx-auto text-black p-6 print:p-0 flex flex-col font-sans text-sm print:text-xs">
               
-              {/* Header - Logo diperkecil (print:h-10) agar hemat ruang atas */}
-              <div className="flex justify-between items-start mb-4 border-b pb-4 print:mb-2 print:pb-2 print:border-black avoid-break">
-                <div className="flex items-center gap-3">
-                  <img src="/logo.png" alt="Logo" className="h-16 w-auto object-contain print:grayscale print:h-10" />
-                  <div className="flex flex-col border-l-2 border-green-200 print:border-black pl-3 ml-1">
-                    <span className="text-[16px] font-black tracking-tight text-[#1a4b1a] print:text-black uppercase print:text-[14px]">FO Helper</span>
-                    <span className="text-[10px] font-bold text-gray-500 print:text-black tracking-wider print:text-[9px]">Jl. Raya Jati No. 123</span>
-                    <span className="text-[10px] text-gray-500 print:text-black print:text-[9px]">WA: 0812-3456-7890</span>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <h1 className="text-lg font-extrabold text-[#1a4b1a] print:text-black tracking-widest uppercase m-0 leading-tight print:text-[16px]">KUITANSI / RECEIPT</h1>
-                  <p className="text-xs mt-1 print:text-black print:text-[10px] print:mt-0">No: <span className="font-bold">{printData.id}</span></p>
-                  <p className="text-[10px] text-gray-500 print:text-black print:text-[9px]">Dicetak: {format(new Date(), 'dd/MM/yyyy HH:mm')}</p>
-                </div>
+              <div className="border-b-2 border-black pb-4 print:pb-2 mb-4 print:mb-2 text-center">
+                <h1 className="text-2xl print:text-xl font-black uppercase tracking-wider">Greenhaus Inn</h1>
+                <p className="text-sm print:text-[10px]">Jl. Ketintang Baru III No.36, Surabaya</p>
+                <p className="text-sm print:text-[10px]">Tanda Terima Pembayaran Akomodasi</p>
               </div>
 
-              {/* Data Grid - print:gap-2 untuk kompresi */}
-              <div className="grid grid-cols-2 gap-4 mb-4 border-b pb-4 print:mb-2 print:pb-2 print:gap-2 print:border-black avoid-break">
+              <div className="flex justify-between mb-6 print:mb-4">
                 <div>
-                  <h2 className="text-xs font-bold text-[#1a4b1a] print:text-black uppercase mb-2 print:mb-1 print:text-[10px]">👤 Data Pelanggan</h2>
-                  <table className="text-xs print:text-[10px] w-full">
+                  <table className="text-sm print:text-[11px]">
                     <tbody>
-                      <tr><td className="text-gray-500 print:text-black w-24 py-0.5 print:py-0">Nama Tamu</td><td className="font-bold print:text-black">: {printData.nama}</td></tr>
-                      <tr><td className="text-gray-500 print:text-black py-0.5 print:py-0">Asal / Instansi</td><td className="print:text-black">: {printData.type === 'harian' ? (printData.tamuDari || '-') : (printData.alamatKantor || '-')}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">No. Transaksi</td><td>: {printData.id}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Tipe Inap</td><td>: {toTitleCase(printData.tipeInap || 'kos')}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Waktu Masuk</td><td>: {format(new Date(printData.type === 'harian' ? printData.checkIn : printData.periodeStart), 'dd/MM/yyyy HH:mm')}</td></tr>
                     </tbody>
                   </table>
                 </div>
                 <div>
-                  <h2 className="text-xs font-bold text-[#1a4b1a] print:text-black uppercase mb-2 print:mb-1 print:text-[10px]">🛏️ Detail Inap</h2>
-                  <table className="text-xs print:text-[10px] w-full">
+                  <table className="text-sm print:text-[11px]">
                     <tbody>
-                      <tr><td className="text-gray-500 print:text-black w-28 py-0.5 print:py-0">No. & Tipe Kamar</td><td className="print:text-black">: <span className="font-bold text-[#1a4b1a] print:text-black">#{printData.type === 'harian' ? printData.noKamar : printData.roomNumber}</span> ({printData.tipeKamar?.split('-')[0].toUpperCase()})</td></tr>
-                      <tr><td className="text-gray-500 print:text-black py-0.5 print:py-0">Jenis Layanan</td><td className="font-bold print:text-black">: Sewa {printData.type === 'harian' ? toTitleCase(printData.tipeInap) : 'Kos Bulanan'}</td></tr>
-                      <tr><td className="text-gray-500 print:text-black py-0.5 print:py-0">Durasi & Periode</td><td className="print:text-black">: {getJumlahMalam((printData.checkIn || printData.periodeStart), (printData.checkOut || printData.periodeEnd), printData.tipeInap || 'kos')}</td></tr>
-                      <tr><td className="text-gray-500 print:text-black py-0.5 print:py-0"></td><td className="text-[10px] print:text-[9px] print:text-black">  {printData.type === 'harian' ? format(new Date(printData.checkIn), 'dd/MM/yy HH:mm') : format(new Date(printData.periodeStart), 'dd/MM/yy')} s/d {printData.type === 'harian' ? format(new Date(printData.checkOut), 'dd/MM/yy HH:mm') : format(new Date(printData.periodeEnd), 'dd/MM/yy')}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Nama Tamu</td><td className="font-bold">: {toTitleCase(printData.nama)}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Kamar</td><td className="font-bold">: #{printData.type === 'harian' ? printData.noKamar : printData.roomNumber}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Waktu Cetak</td><td>: {format(new Date(), 'dd/MM/yyyy HH:mm')}</td></tr>
                     </tbody>
                   </table>
                 </div>
               </div>
 
-              {/* Tabel Biaya Akomodasi - print:py-0.5 agar item banyak tetap tipis */}
-              <div className="mb-4 print:mb-2">
-                <h2 className="text-xs font-bold text-[#1a4b1a] print:text-black uppercase mb-1 print:text-[10px]">I. Rincian Biaya Sewa (Non-Refundable)</h2>
-                <table className="w-full text-xs print:text-[10px] border border-gray-200 print:border-black">
+              <div className="mb-4 print:mb-2 flex-1">
+                <h3 className="font-bold mb-2 print:mb-1 uppercase border-b border-gray-300 print:border-black inline-block text-sm print:text-xs">I. Rincian Biaya Sewa (Non-Refundable)</h3>
+                <table className="w-full text-sm print:text-[11px] mb-4 print:mb-2 border print:border-black">
                   <thead className="bg-[#1a4b1a] text-white print:bg-white print:text-black print:border-b-2 print:border-black">
                     <tr>
                       <th className="p-2 print:py-1 text-left print:border-black print:border-b">Deskripsi Transaksi</th>
-                      <th className="p-2 print:py-1 text-center w-24 print:border-black print:border-b">Metode</th>
                       <th className="p-2 print:py-1 text-right w-32 print:border-black print:border-b">Nominal (Rp)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {/* SUPPORT MULTI-PAYMENT PADA STRUK */}
-                    {printData.pembayaran?.detailMetodeKamar && printData.pembayaran.detailMetodeKamar.length > 0 ? (
-                      printData.pembayaran.detailMetodeKamar.map((m, idx) => (
-                        <tr key={`mk-${idx}`} className="border-b border-gray-100 print:border-black">
-                          <td className="p-2 print:py-0.5 print:border-black">Sewa Kamar #{printData.type === 'harian' ? printData.noKamar : printData.roomNumber} {printData.pembayaran.detailMetodeKamar.length > 1 ? `(Split Payment ${idx + 1})` : ''}</td>
-                          <td className="p-2 print:py-0.5 text-center print:border-black">{m.metode}</td>
-                          <td className="p-2 print:py-0.5 text-right print:border-black">{formatRp(m.nominal)}</td>
+                    {printData.pembayaran?.rincianTarifHarian && printData.pembayaran.rincianTarifHarian.length > 0 ? (
+                      printData.pembayaran.rincianTarifHarian.map((malam, idx) => (
+                        <tr key={`mlm-${idx}`} className="border-b border-gray-100 print:border-black">
+                          <td className="p-2 print:py-0.5 print:border-black">
+                            Sewa Kamar #{printData.noKamar} (Malam {idx + 1}) - {format(new Date(malam.tanggal), 'dd/MM/yy')} <span className="text-[9px] uppercase">({malam.jenis})</span>
+                          </td>
+                          <td className="p-2 print:py-0.5 text-right print:border-black">{formatRp(malam.harga)}</td>
                         </tr>
                       ))
                     ) : (
                       <tr className="border-b border-gray-100 print:border-black">
                         <td className="p-2 print:py-0.5 print:border-black">Sewa Kamar #{printData.type === 'harian' ? printData.noKamar : printData.roomNumber}</td>
-                        <td className="p-2 print:py-0.5 text-center print:border-black">{printData.pembayaran?.metodeKamar || '-'}</td>
                         <td className="p-2 print:py-0.5 text-right print:border-black">{formatRp(printData.pembayaran?.jumlahKamar)}</td>
                       </tr>
                     )}
+                    
+                    {printData.pembayaran?.tambahan && printData.pembayaran.tambahan.map((t, idx) => (
+                      <tr key={idx} className="border-b border-gray-100 print:border-black">
+                        <td className="p-2 print:py-0.5 print:border-black">Tambahan: {t.nama}</td>
+                        <td className="p-2 print:py-0.5 text-right print:border-black">{formatRp(t.jumlah)}</td>
+                      </tr>
+                    ))}
+
                     <tr className="bg-gray-50 font-bold print:bg-white print:border-t-2 print:border-black">
-                      <td colSpan="2" className="p-2 print:py-1 text-right text-[#1a4b1a] print:text-black print:border-black">TOTAL BIAYA AKOMODASI (A):</td>
+                      <td className="p-2 print:py-1 text-right text-[#1a4b1a] print:text-black print:border-black">TOTAL BIAYA AKOMODASI (A):</td>
                       <td className="p-2 print:py-1 text-right text-[#1a4b1a] print:text-black print:border-black">
                         {formatRp((printData.pembayaran?.jumlahKamar || 0) + (printData.pembayaran?.tambahan || []).reduce((sum, item) => sum + item.jumlah, 0))}
                       </td>
                     </tr>
+                    
+                    {printData.pembayaran?.detailMetodeKamar?.length > 0 ? (
+                      printData.pembayaran.detailMetodeKamar.map((m, idx) => (
+                        <tr key={`bayar-${idx}`} className="print:bg-white border-t border-gray-100 border-dashed print:border-black text-gray-700">
+                          <td className="p-2 print:py-1 text-right print:text-black print:border-black text-xs print:text-[10px]">
+                            Dibayar via <span className="font-bold uppercase">{m.metode}</span>:
+                          </td>
+                          <td className="p-2 print:py-1 text-right print:text-black print:border-black font-bold text-xs print:text-[10px]">
+                            {formatRp(m.nominal)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr className="print:bg-white border-t border-gray-100 border-dashed print:border-black text-gray-700">
+                        <td className="p-2 print:py-1 text-right print:text-black print:border-black text-xs print:text-[10px]">
+                          Dibayar via <span className="font-bold uppercase">{printData.pembayaran?.metodeKamar || '-'}</span>:
+                        </td>
+                        <td className="p-2 print:py-1 text-right print:text-black print:border-black font-bold text-xs print:text-[10px]">
+                          {formatRp(printData.pembayaran?.jumlahKamar)}
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
-              </div>
 
-              {/* Tabel Titipan Jaminan - print:py-0.5 */}
-              <div className="mb-4 print:mb-2 avoid-break">
-                <h2 className="text-xs font-bold text-[#d97a31] print:text-black uppercase mb-1 print:text-[10px]">II. Titipan Jaminan Hunian (Refundable Deposit)</h2>
-                <table className="w-full text-xs print:text-[10px] border border-orange-200 print:border-black">
-                  <thead className="bg-[#d97a31] text-white print:bg-white print:text-black print:border-b-2 print:border-black">
-                    <tr>
-                      <th className="p-2 print:py-1 text-left print:border-black print:border-b">Jenis Titipan Keamanan</th>
-                      <th className="p-2 print:py-1 text-center w-24 print:border-black print:border-b">Metode</th>
-                      <th className="p-2 print:py-1 text-right w-32 print:border-black print:border-b">Nominal (Rp)</th>
-                    </tr>
+                <h3 className="font-bold mb-2 print:mb-1 uppercase border-b border-gray-300 print:border-black inline-block text-sm print:text-xs">II. Titipan Deposit (Refundable)</h3>
+                <table className="w-full text-sm print:text-[11px] border print:border-black">
+                  <thead className="bg-[#1a4b1a] text-white print:bg-white print:text-black print:border-b-2 print:border-black">
+                    <tr><th className="p-2 print:py-1 text-left print:border-black print:border-b">Keterangan</th><th className="p-2 print:py-1 text-right w-32 print:border-black print:border-b">Nominal (Rp)</th></tr>
                   </thead>
                   <tbody>
-                    <tr className="border-b border-orange-100 print:border-black">
-                      <td className="p-2 print:py-0.5 print:border-black">Uang Jaminan Kamar (Fasilitas & Kunci)</td>
-                      <td className="p-2 print:py-0.5 text-center print:border-black">{printData.pembayaran?.metodeDeposit || '-'}</td>
+                    <tr className="border-b border-gray-100 print:border-black">
+                      <td className="p-2 print:py-0.5 print:border-black">Uang Jaminan Kamar (Dititipkan via {printData.pembayaran?.metodeDeposit || '-'})</td>
                       <td className="p-2 print:py-0.5 text-right print:border-black">{formatRp(printData.pembayaran?.jumlahDeposit)}</td>
                     </tr>
-                    <tr className="bg-orange-50 font-bold print:bg-white print:border-t-2 print:border-black">
-                      <td colSpan="2" className="p-2 print:py-1 text-right text-[#d97a31] print:text-black print:border-black">TOTAL DEPOSIT (B):</td>
-                      <td className="p-2 print:py-1 text-right text-[#d97a31] print:text-black print:border-black">{formatRp(printData.pembayaran?.jumlahDeposit)}</td>
+                    <tr className="print:bg-white print:border-t-2 print:border-black">
+                      <td className="p-2 print:py-1 text-left text-gray-600 print:text-black print:border-black italic text-[10px] print:text-[9px]">Uang Jaminan akan dikembalikan saat Check-Out apabila tidak ada kerusakan/kehilangan aset kamar.</td>
+                      <td className="p-2 print:py-1 text-right font-bold text-[#1a4b1a] print:text-black print:border-black">{formatRp(printData.pembayaran?.jumlahDeposit)}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
 
-              {/* Footer / Tanda Tangan - Tetap menggunakan format yang benar (Ttd di atas garis) */}
-              <div className="flex justify-between items-end mt-4 print:mt-1 avoid-break">
-                <div className="w-1/2">
-                  <div className="border border-dashed border-[#d97a31] print:border-black print:border-solid p-1.5 rounded bg-orange-50/50 print:bg-white text-[9px] print:text-[8px] text-gray-600 print:text-black leading-tight">
-                    <span className="font-bold">Info Pengembalian Deposit (Total B):</span><br/>
-                    Dana akan dikembalikan penuh saat Check-Out apabila tidak ada kerusakan fasilitas kamar & kunci dikembalikan sebelum batas waktu sewa.
-                  </div>
+              <div className="mt-8 print:mt-4 flex justify-between items-end text-sm print:text-[10px]">
+                <div className="text-center w-40">
+                  <p className="mb-12 print:mb-8 text-gray-500 print:text-black">Tamu,</p>
+                  <p className="font-bold border-b border-gray-400 print:border-black pb-1 uppercase">{printData.nama}</p>
                 </div>
-                <div className="flex w-1/2 justify-around text-center text-xs print:text-[10px]">
-                  <div className="flex flex-col items-center">
-                    <span className="w-24 border-t border-gray-400 print:border-black mb-1 mt-10 print:mt-8"></span>
-                    <span className="print:text-black">Tamu</span>
-                  </div>
-                  <div className="flex flex-col items-center">
-                    <span className="w-24 border-t border-[#1a4b1a] print:border-black mb-1 mt-10 print:mt-8"></span>
-                    <span className="font-bold text-[#1a4b1a] print:text-black">Front Office</span>
-                  </div>
+                <div className="text-center w-40">
+                  <p className="mb-12 print:mb-8 text-gray-500 print:text-black">Resepsionis,</p>
+                  <p className="font-bold border-b border-gray-400 print:border-black pb-1 uppercase">FO Greenhaus</p>
                 </div>
               </div>
-
             </div>
           </div>
+
+          <style>{`
+            @media print {
+              @page { size: A5 landscape; margin: 0; }
+              body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background-color: white; }
+              html, body { width: 210mm; height: 148mm; }
+            }
+          `}</style>
         </div>
       )}
-
     </div>
   );
 }

@@ -17,7 +17,7 @@ export default function DatabasePelanggan() {
   const [citySearch, setCitySearch] = useState('');
   const [cityPage, setCityPage] = useState(1);
 
-useEffect(() => {
+  useEffect(() => {
     const loadData = async () => {
       setLoading(true);
       try {
@@ -53,10 +53,11 @@ useEffect(() => {
             existing.totalKunjungan += 1;
             existing.riwayatInap.push(item);
             
-            // Auto-fill kontak/NIK jika transaksi lama kosong tapi transaksi baru ada
+            // Auto-fill kontak/NIK/Gender jika transaksi lama kosong tapi transaksi baru ada
             if (!existing.noTelp && item.noTelp) existing.noTelp = item.noTelp;
             if (!existing.nik && item.nik) existing.nik = item.nik;
             if (!existing.alamatLengkap && item.alamatLengkap) existing.alamatLengkap = item.alamatLengkap;
+            if (!existing.jenisKelamin && item.jenisKelamin) existing.jenisKelamin = item.jenisKelamin;
           }
         });
 
@@ -133,7 +134,9 @@ useEffect(() => {
                 filteredPelanggan.map((p) => (
                   <tr key={p.id} className="border-b border-gray-100 hover:bg-blue-50/30 transition-colors">
                     <td className="p-4">
-                      <div className="font-bold text-gray-900 text-base">{p.nama}</div>
+                      <div className="font-bold text-gray-900 text-base">
+                        {p.nama} {p.jenisKelamin === 'Laki-laki' ? '♂️' : p.jenisKelamin === 'Perempuan' ? '♀️' : p.jenisKelamin === 'Lain-lain' ? '⚪' : ''}
+                      </div>
                       <div className="mt-1 flex flex-wrap gap-2">
                         <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${p.dbType === 'harian' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>
                           {p.dbType === 'harian' ? 'Tamu Harian' : 'Penghuni Kos'}
@@ -192,9 +195,11 @@ useEffect(() => {
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Jenis Kelamin</label>
-                  <select value={editForm.jenisKelamin || 'Laki-laki'} onChange={(e) => setEditForm({...editForm, jenisKelamin: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm">
-                    <option value="Laki-laki">Laki-laki</option>
-                    <option value="Perempuan">Perempuan</option>
+                  <select value={editForm.jenisKelamin || ''} onChange={(e) => setEditForm({...editForm, jenisKelamin: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm">
+                    <option value="" disabled hidden>- Pilih -</option>
+                    <option value="Laki-laki">Laki-laki ♂️</option>
+                    <option value="Perempuan">Perempuan ♀️</option>
+                    <option value="Lain-lain">Lain-lain ⚪</option>
                   </select>
                 </div>
                 <div>

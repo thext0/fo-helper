@@ -43,6 +43,7 @@ export default function FormCheckIn() {
   const initWaktuMasuk = format(initSekarang, "yyyy-MM-dd'T'HH:mm");
   
   const [nama, setNama] = useState('');
+  const [jenisKelamin, setJenisKelamin] = useState(''); // STATE JENIS KELAMIN
   const [waktuMasuk, setWaktuMasuk] = useState(initWaktuMasuk);
   const [waktuKeluar, setWaktuKeluar] = useState(hitungWaktuKeluar(initWaktuMasuk, 'harian')); 
   const [durasiMalam, setDurasiMalam] = useState(1);
@@ -70,7 +71,6 @@ export default function FormCheckIn() {
   const [otaList, setOtaList] = useState([]);
   const [depositDefault, setDepositDefault] = useState(0);
   
-  // STATE BARU: DYNAMIC PRICING (WEEKDAY / WEEKEND)
   const [hargaDinamis, setHargaDinamis] = useState({ 
     harianWeekday: {}, harianWeekend: {}, 
     transitWeekday: {}, transitWeekend: {}, 
@@ -85,7 +85,7 @@ export default function FormCheckIn() {
   const [previewText, setPreviewText] = useState('Memuat laporan in-house terbaru...');
   const [refreshPreviewTrigger, setRefreshPreviewTrigger] = useState(0);
 
-  // LOAD SETTINGS (Hanya 1x saat aplikasi load)
+  // LOAD SETTINGS
   useEffect(() => {
     const fetchSettings = async () => {
       try {
@@ -106,7 +106,7 @@ export default function FormCheckIn() {
           setWeekendDays(s.weekendDays !== undefined ? s.weekendDays : [5, 6, 0]);
           setFloors(s.floors || []);
 
-          // SMART SEARCH CRM: Kumpulkan Data Tamu
+          // SMART SEARCH CRM
           const allTx = [...(data.dailyTransactions || []), ...(data.activeKost || [])];
           const uniqueGuests = [];
           const map = new Map();
@@ -207,10 +207,11 @@ export default function FormCheckIn() {
     buildPreview();
   }, [refreshPreviewTrigger]);
 
-  // LOGIKA DYNAMIC PRICING: Kalkulasi Total Tagihan (Looping per malam agar akurat jika menyilang dari Kamis ke Jumat)
+  // LOGIKA DYNAMIC PRICING
   let totalTagihanKamar = 0;
   let isTransitWeekend = false;
   let rincianMalam = { weekday: 0, weekend: 0 }; 
+  let rincianTarifHarian = []; 
 
   if (tipeInap === 'kos') {
     totalTagihanKamar = hargaDinamis.kos?.[tipeKamar] || 0;
@@ -228,20 +229,21 @@ export default function FormCheckIn() {
     const tarifWd = hargaDinamis.harianWeekday?.[tipeKamar] || 0;
     const tarifWe = hargaDinamis.harianWeekend?.[tipeKamar] || 0;
 
-    // Menghitung harga per malam untuk multi-day check-in
     for (let i = 0; i < durasiMalam; i++) {
       const nightDate = addDays(baseDate, i);
       if (weekendDays.includes(nightDate.getDay())) {
         totalTagihanKamar += tarifWe;
         rincianMalam.weekend += 1;
+        rincianTarifHarian.push({ tanggal: nightDate.toISOString(), jenis: 'Weekend', harga: tarifWe });
       } else {
         totalTagihanKamar += tarifWd;
         rincianMalam.weekday += 1;
+        rincianTarifHarian.push({ tanggal: nightDate.toISOString(), jenis: 'Weekday', harga: tarifWd });
       }
     }
   }
 
-  // STATE TRACKER: Pelacak nilai sebelumnya agar sinkronisasi bisa dilakukan tanpa useEffect (Fix Purity ESLint)
+  // STATE TRACKER
   const [prevTotalTagihan, setPrevTotalTagihan] = useState(totalTagihanKamar);
   if (totalTagihanKamar !== prevTotalTagihan) {
     setPrevTotalTagihan(totalTagihanKamar);
@@ -293,7 +295,6 @@ export default function FormCheckIn() {
   const updateBiaya = (id, field, value) => setTambahanList(tambahanList.map(item => item.id === id ? { ...item, [field]: value } : item));
   const hapusBiaya = (id) => setTambahanList(tambahanList.filter(item => item.id !== id));
 
-  // VARIABEL KALKULASI REAL-TIME SISA BAYAR (Validasi Split Payment)
   const totalBayarKamar = detailMetodeKamar.reduce((sum, item) => sum + (Number(item.nominal) || 0), 0);
   const selisihBayar = totalTagihanKamar - totalBayarKamar;
 
@@ -345,8 +346,8 @@ export default function FormCheckIn() {
           id: `TX-${Date.now()}`, waktuInput: new Date().toISOString(), 
           nama, pernahCI, bookingBy, tamuDari, noKamar: nomorKamarBersih, 
           checkIn: waktuMasuk, checkOut: waktuKeluar, tipeInap, tipeKamar, info,
-          noTelp: '', profesi: '', nik: '', tanggalLahir: '', jenisKelamin: 'Laki-laki', alamatLengkap: '', statusDeposit: 'Belum Refund',
-          pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, metodeDeposit, jumlahDeposit: depositDefault, tambahan: tambahanList.filter(t => t.nama && t.jumlah > 0) }
+          noTelp: '', profesi: '', nik: '', tanggalLahir: '', jenisKelamin: jenisKelamin || '-', alamatLengkap: '', statusDeposit: 'Belum Refund',
+          pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, metodeDeposit, jumlahDeposit: depositDefault, tambahan: tambahanList.filter(t => t.nama && t.jumlah > 0), rincianTarifHarian }
         };
         if (!dbData.dailyTransactions) dbData.dailyTransactions = [];
         dbData.dailyTransactions.push(transaksiBaru);
@@ -360,7 +361,7 @@ export default function FormCheckIn() {
           nama, roomType: tipeKamar, roomNumber: nomorKamarBersih, waktuMasuk, 
           periodeStart: format(actualStart, 'yyyy-MM-dd'), periodeEnd: format(waktuKeluar, 'yyyy-MM-dd'), 
           tamuDari,
-          noTelp: '', profesi: '', alamatKantor: '', nik: '', tanggalLahir: '', jenisKelamin: 'Laki-laki', alamatLengkap: '', statusDeposit: 'Belum Refund',
+          noTelp: '', profesi: '', alamatKantor: '', nik: '', tanggalLahir: '', jenisKelamin: jenisKelamin || '-', alamatLengkap: '', statusDeposit: 'Belum Refund',
           pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, metodeDeposit, jumlahDeposit: depositDefault, tambahan: tambahanList.filter(t => t.nama && t.jumlah > 0) } 
         };
         if (!dbData.activeKost) dbData.activeKost = [];
@@ -372,7 +373,7 @@ export default function FormCheckIn() {
       
       if (result.success) {
         alert("Penerimaan Tamu Berhasil!");
-        setNama(''); setNoKamar(''); setTambahanList([]);
+        setNama(''); setJenisKelamin(''); setNoKamar(''); setTambahanList([]);
         setDetailMetodeKamar([{ id: Date.now(), metode: 'Cash', nominal: 0 }]); 
         setRefreshPreviewTrigger(prev => prev + 1); 
       } else { alert("Gagal menyimpan: " + result.error); }
@@ -398,20 +399,39 @@ export default function FormCheckIn() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        
+        {/* ROW 1: Nama & Jenis Kelamin dalam satu blok grid */}
         <div className="relative">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Nama Tamu</label>
-          <input 
-            type="text" 
-            value={nama} 
-            onChange={(e) => { 
-              setNama(toTitleCase(e.target.value)); 
-              setShowSuggestions(true);
-              if (!e.target.value) { setPernahCI(false); updateInfoText(false, bookingBy); }
-            }} 
-            onFocus={() => setShowSuggestions(true)}
-            className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 transition-shadow" 
-            placeholder="Ketik nama tamu..." 
-          />
+          <div className="grid grid-cols-3 gap-2">
+            <div className="col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Nama Tamu</label>
+              <input 
+                type="text" 
+                value={nama} 
+                onChange={(e) => { 
+                  setNama(toTitleCase(e.target.value)); 
+                  setShowSuggestions(true);
+                  if (!e.target.value) { setPernahCI(false); updateInfoText(false, bookingBy); }
+                }} 
+                onFocus={() => setShowSuggestions(true)}
+                className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 transition-shadow" 
+                placeholder="Ketik nama tamu..." 
+              />
+            </div>
+            <div className="col-span-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Kelamin</label>
+              <select 
+                value={jenisKelamin} 
+                onChange={(e) => setJenisKelamin(e.target.value)} 
+                className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500"
+              >
+                <option value="" disabled hidden>- Pilih -</option>
+                <option value="Laki-laki">Laki-laki ♂️</option>
+                <option value="Perempuan">Perempuan ♀️</option>
+                <option value="Lain-lain">Lain-lain ⚪</option>
+              </select>
+            </div>
+          </div>
           
           <div className="mt-1.5 h-5">
             {pernahCI && <span className="inline-block bg-green-100 text-green-800 text-[10px] font-extrabold px-2 py-0.5 rounded uppercase tracking-wider shadow-sm">✅ Tamu Langganan (Pernah C/I)</span>}
