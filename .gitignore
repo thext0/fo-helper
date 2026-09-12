@@ -56,3 +56,7 @@ coverage/
 .cache/
 temp/
 tmp/
+
+# Root-level development notes and requirement files
+/*.txt
+/*.pdf

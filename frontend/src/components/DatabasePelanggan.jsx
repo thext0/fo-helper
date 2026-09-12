@@ -23,45 +23,80 @@ export default function DatabasePelanggan() {
       try {
         const res = await fetch('http://localhost:5000/api/data');
         if (!res.ok) throw new Error("Gagal memuat data");
-        const data = await res.json();
+        let data = await res.json();
         
-        // 1. Ambil semua data mentah dan urutkan dari yang terbaru
+        let guests = data.guests || [];
+        let needSave = false;
+
         const rawData = [
           ...(data.dailyTransactions || []).map(tx => ({ ...tx, dbType: 'harian' })),
           ...(data.activeKost || []).map(kos => ({ ...kos, dbType: 'kos' }))
         ].sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput));
 
-        // 2. Grouping berdasarkan Nama (Case Insensitive)
-        const groupedData = [];
-        const map = new Map();
-
-        rawData.forEach(item => {
-          const key = (item.nama || '').toLowerCase().trim();
-          if (!key) return;
-
-          if (!map.has(key)) {
-            // Jika nama belum ada, buat entri baru dengan riwayat
-            map.set(key, {
-              ...item,
-              totalKunjungan: 1,
-              riwayatInap: [item]
+        // MIGRASI OTOMATIS: Jika tabel guests belum ada, buat dari histori transaksi
+        if (!data.guests) {
+            const map = new Map();
+            rawData.forEach(item => {
+                const key = (item.nama || '').toLowerCase().trim();
+                if (!key) return;
+                
+                if (!map.has(key)) {
+                    map.set(key, {
+                        guestId: `GST-${Date.now()}-${Math.floor(Math.random()*10000)}`,
+                        nama: toTitleCase(item.nama),
+                        noTelp: item.noTelp || '',
+                        nik: item.nik || '',
+                        tanggalLahir: item.tanggalLahir || '',
+                        jenisKelamin: item.jenisKelamin || '',
+                        profesi: item.profesi || '',
+                        tamuDari: item.tamuDari || '',
+                        alamatKantor: item.alamatKantor || '',
+                        alamatLengkap: item.alamatLengkap || '',
+                        waktuDibuat: item.waktuInput || new Date().toISOString()
+                    });
+                } else {
+                    const existing = map.get(key);
+                    if (!existing.noTelp && item.noTelp) existing.noTelp = item.noTelp;
+                    if (!existing.nik && item.nik) existing.nik = item.nik;
+                    if (!existing.jenisKelamin && item.jenisKelamin) existing.jenisKelamin = item.jenisKelamin;
+                    if (!existing.alamatLengkap && item.alamatLengkap) existing.alamatLengkap = item.alamatLengkap;
+                }
             });
-            groupedData.push(map.get(key));
-          } else {
-            // Jika nama sudah ada, tambahkan ke riwayat dan update total
-            const existing = map.get(key);
-            existing.totalKunjungan += 1;
-            existing.riwayatInap.push(item);
+            guests = Array.from(map.values());
+            data.guests = guests;
             
-            // Auto-fill kontak/NIK/Gender jika transaksi lama kosong tapi transaksi baru ada
-            if (!existing.noTelp && item.noTelp) existing.noTelp = item.noTelp;
-            if (!existing.nik && item.nik) existing.nik = item.nik;
-            if (!existing.alamatLengkap && item.alamatLengkap) existing.alamatLengkap = item.alamatLengkap;
-            if (!existing.jenisKelamin && item.jenisKelamin) existing.jenisKelamin = item.jenisKelamin;
-          }
+            // Suntikkan guestId ke transaksi lama
+            (data.dailyTransactions || []).forEach(tx => {
+                const key = (tx.nama || '').toLowerCase().trim();
+                if (map.has(key)) tx.guestId = map.get(key).guestId;
+            });
+            (data.activeKost || []).forEach(kos => {
+                const key = (kos.nama || '').toLowerCase().trim();
+                if (map.has(key)) kos.guestId = map.get(key).guestId;
+            });
+            
+            needSave = true;
+        }
+
+        // Kalkulasi riwayat inap per guest
+        const guestsWithHistory = guests.map(g => {
+            const riwayat = rawData.filter(tx => tx.guestId === g.guestId || (tx.nama || '').toLowerCase().trim() === (g.nama || '').toLowerCase().trim());
+            return { ...g, totalKunjungan: riwayat.length, riwayatInap: riwayat };
         });
 
-        setSemuaPelanggan(groupedData);
+        if (needSave) {
+            await fetch('http://localhost:5000/api/data/save', { 
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) 
+            });
+        }
+
+        guestsWithHistory.sort((a, b) => {
+            const dateA = a.riwayatInap.length > 0 ? new Date(a.riwayatInap[0].waktuInput) : new Date(a.waktuDibuat);
+            const dateB = b.riwayatInap.length > 0 ? new Date(b.riwayatInap[0].waktuInput) : new Date(b.waktuDibuat);
+            return dateB - dateA;
+        });
+
+        setSemuaPelanggan(guestsWithHistory);
       } catch (error) { console.error("Gagal mengambil data pelanggan:", error); } finally { setLoading(false); }
     };
     loadData();
@@ -78,12 +113,12 @@ export default function DatabasePelanggan() {
       const res = await fetch('http://localhost:5000/api/data');
       const dbData = await res.json();
 
-      if (editingBerkas.dbType === 'harian') {
-        const index = dbData.dailyTransactions.findIndex(tx => tx.id === editingBerkas.id);
-        if (index !== -1) dbData.dailyTransactions[index] = { ...dbData.dailyTransactions[index], ...editForm };
+      const index = (dbData.guests || []).findIndex(g => g.guestId === editingBerkas.guestId);
+      if (index !== -1) {
+          dbData.guests[index] = { ...dbData.guests[index], ...editForm };
       } else {
-        const index = dbData.activeKost.findIndex(kos => kos.id === editingBerkas.id);
-        if (index !== -1) dbData.activeKost[index] = { ...dbData.activeKost[index], ...editForm };
+          if(!dbData.guests) dbData.guests = [];
+          dbData.guests.push({...editForm});
       }
 
       const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
@@ -132,14 +167,14 @@ export default function DatabasePelanggan() {
             <tbody>
               {filteredPelanggan.length === 0 ? (<tr><td colSpan="4" className="p-8 text-center text-gray-500 italic">Tidak ada data pelanggan yang cocok.</td></tr>) : (
                 filteredPelanggan.map((p) => (
-                  <tr key={p.id} className="border-b border-gray-100 hover:bg-blue-50/30 transition-colors">
+                  <tr key={p.guestId} className="border-b border-gray-100 hover:bg-blue-50/30 transition-colors">
                     <td className="p-4">
                       <div className="font-bold text-gray-900 text-base">
-                        {p.nama} {p.jenisKelamin === 'Laki-laki' ? '♂️' : p.jenisKelamin === 'Perempuan' ? '♀️' : p.jenisKelamin === 'Lain-lain' ? '⚪' : ''}
+                        {p.nama} {p.jenisKelamin && p.jenisKelamin.toLowerCase().includes('laki') ? '♂️' : p.jenisKelamin && p.jenisKelamin.toLowerCase().includes('perempuan') ? '♀️' : p.jenisKelamin && p.jenisKelamin.toLowerCase().includes('lain') ? '⚪' : <span className="text-[10px] text-red-400 italic font-normal ml-1">(Gender Kosong)</span>}
                       </div>
                       <div className="mt-1 flex flex-wrap gap-2">
-                        <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${p.dbType === 'harian' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>
-                          {p.dbType === 'harian' ? 'Tamu Harian' : 'Penghuni Kos'}
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-800 shadow-sm">
+                          ID: {p.guestId}
                         </span>
                         <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-100 text-purple-700 shadow-sm border border-purple-200">
                           {p.totalKunjungan} Kunjungan
@@ -153,19 +188,11 @@ export default function DatabasePelanggan() {
                     </td>
                     <td className="p-4">
                       <div className="font-mono text-xs text-gray-600 mb-1">NIK: <span className="font-bold text-gray-800">{p.nik || '-'}</span></div>
-                      <div className="text-xs text-gray-500 truncate max-w-[200px]">
-                        📍 {p.tamuDari || 'Kota Asal Kosong'}
-                      </div>
-                      {p.dbType === 'kos' && (
-                        <div className="text-[10px] text-gray-400 truncate max-w-[200px] mt-0.5">
-                          🏢 {p.alamatKantor || 'Instansi Kosong'}
-                        </div>
-                      )}
+                      <div className="text-xs text-gray-500 truncate max-w-[200px]">📍 {p.tamuDari || 'Kota Asal Kosong'}</div>
+                      {p.alamatKantor && (<div className="text-[10px] text-gray-400 truncate max-w-[200px] mt-0.5">🏢 {p.alamatKantor}</div>)}
                     </td>
                     <td className="p-4 text-center">
-                      <button onClick={() => openBerkasModal(p)} className="bg-blue-600 hover:bg-blue-700 text-white w-full py-2 rounded text-sm font-bold shadow-sm transition-colors">
-                        📄 Kelola Biodata
-                      </button>
+                      <button onClick={() => openBerkasModal(p)} className="bg-blue-600 hover:bg-blue-700 text-white w-full py-2 rounded text-sm font-bold shadow-sm transition-colors">📄 Kelola Biodata</button>
                     </td>
                   </tr>
                 ))
@@ -219,17 +246,14 @@ export default function DatabasePelanggan() {
                   <input type="text" value={editForm.profesi || ''} onChange={(e) => setEditForm({...editForm, profesi: toTitleCase(e.target.value)})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"/>
                 </div>
                 
-                <div className={editingBerkas.dbType === 'harian' ? "sm:col-span-2 pt-2 border-t border-gray-100" : "sm:col-span-1 pt-2 border-t border-gray-100"}>
+                <div className="sm:col-span-1 pt-2 border-t border-gray-100">
                   <label className="block text-xs font-bold text-gray-700 mb-1">Kota Asal (Pilih dari Daftar)</label>
                   <input type="text" value={editForm.tamuDari || ''} readOnly onClick={() => setIsCityModalOpen(true)} className="w-full border border-gray-300 rounded p-2 text-sm bg-blue-50 cursor-pointer font-medium text-blue-800 shadow-sm" placeholder="Klik untuk memilih kota..." />
                 </div>
-                
-                {editingBerkas.dbType === 'kos' && (
-                  <div className="sm:col-span-1 pt-2 border-t border-gray-100">
-                    <label className="block text-xs font-bold text-gray-700 mb-1">Alamat Kantor / Instansi</label>
-                    <input type="text" value={editForm.alamatKantor || ''} onChange={(e) => setEditForm({...editForm, alamatKantor: toTitleCase(e.target.value)})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm" placeholder="Contoh: PT. Bintang / ITS"/>
-                  </div>
-                )}
+                <div className="sm:col-span-1 pt-2 border-t border-gray-100">
+                  <label className="block text-xs font-bold text-gray-700 mb-1">Alamat Kantor / Instansi</label>
+                  <input type="text" value={editForm.alamatKantor || ''} onChange={(e) => setEditForm({...editForm, alamatKantor: toTitleCase(e.target.value)})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm" placeholder="Contoh: PT. Bintang / ITS"/>
+                </div>
                 
                 <div className="sm:col-span-2">
                   <label className="block text-xs font-bold text-gray-700 mb-1">Alamat Domisili / Tempat Tinggal Lengkap</label>
