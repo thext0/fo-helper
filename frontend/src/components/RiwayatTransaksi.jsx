@@ -1,10 +1,9 @@
 // [START: RiwayatTransaksiModule]
-import { useState, useEffect, useMemo } from 'react';
-// Penambahan import startOfDay, endOfDay, dll untuk kalkulasi dasbor
-import { format, differenceInDays, addDays, subDays, addHours, isSameDay, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns';
-import * as XLSX from 'xlsx';
+import { useState, useEffect } from 'react';
+import { format, differenceInDays, addDays, subDays, addHours, isSameDay, startOfDay, endOfDay } from 'date-fns';
+import { useDialog } from './DialogProvider';
+import CustomDateTimePicker from './CustomDateTimePicker';
 
-// [START: Helpers]
 const formatRp = (angka) => {
   return Number(angka || 0).toLocaleString('id-ID');
 };
@@ -13,17 +12,17 @@ const toTitleCase = (str) => {
   if (!str) return '';
   return str.toLowerCase().replace(/\b\w/g, s => s.toUpperCase());
 };
-// [END: Helpers]
 
 export default function RiwayatTransaksi() {
-  // [START: StateManagement]
-  const [rolloverHour, setRolloverHour] = useState(12);
+  const { alert, confirm, prompt, toast } = useDialog();
 
+  const [rolloverHour, setRolloverHour] = useState(12);
   const [transactions, setTransactions] = useState([]);
   const [unresolvedList, setUnresolvedList] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [dateFilter, setDateFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('Semua');
+  
+  const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+  const [statusFilter, setStatusFilter] = useState('Aktif');
   const [sortConfig, setSortConfig] = useState({ key: 'waktuMasuk', direction: 'desc' });
   const [printData, setPrintData] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -63,14 +62,6 @@ export default function RiwayatTransaksi() {
   const [payDetailMetode, setPayDetailMetode] = useState([]);
   const [payTambahan, setPayTambahan] = useState([]);
 
-  // STATE BARU: Dashboard Finansial Lanjutan
-  const [isFinancialModalOpen, setIsFinancialModalOpen] = useState(false);
-  const [finData, setFinData] = useState([]);
-  const [reportPeriod, setReportPeriod] = useState('harian'); // harian, mingguan, bulanan, kustom
-  const [customDate, setCustomDate] = useState({ start: format(new Date(), 'yyyy-MM-dd'), end: format(new Date(), 'yyyy-MM-dd') });
-  // [END: StateManagement]
-
-  // [START: Effects]
   useEffect(() => {
     const handleAfterPrint = () => setPrintData(null);
     window.addEventListener('afterprint', handleAfterPrint);
@@ -92,7 +83,6 @@ export default function RiwayatTransaksi() {
           let jk = tx.jenisKelamin;
           if (!jk || jk === '-' || jk === '') jk = g.jenisKelamin;
           if (!jk || jk === '-' || jk === '') jk = 'Tidak Diisi';
-          
           return { ...tx, jenisKelamin: jk };
         };
 
@@ -136,61 +126,12 @@ export default function RiwayatTransaksi() {
     } catch (error) { console.error("Gagal mengambil data:", error); }
   };
 
-useEffect(() => {
+  useEffect(() => {
     const timer = setTimeout(() => { fetchData(); }, 0);
     return () => clearTimeout(timer);
+   
   }, []);
 
-  // ENGINE DASHBOARD: Menggunakan useMemo agar tidak terjadi Cascading Renders
-  const { filteredFinData, finStats } = useMemo(() => {
-    if (!isFinancialModalOpen || finData.length === 0) {
-      return { filteredFinData: [], finStats: { netto: 0, kamar: 0, ekstra: 0, diskon: 0, count: 0 } };
-    }
-
-    const now = new Date();
-    let startDate, endDate;
-
-    // Logika Pemotongan Tanggal
-    if (reportPeriod === 'harian') {
-      startDate = startOfDay(now);
-      endDate = endOfDay(now);
-    } else if (reportPeriod === 'mingguan') {
-      startDate = startOfWeek(now, { weekStartsOn: 1 }); // Dimulai dari Senin
-      endDate = endOfWeek(now, { weekStartsOn: 1 });
-    } else if (reportPeriod === 'bulanan') {
-      startDate = startOfMonth(now);
-      endDate = endOfMonth(now);
-    } else if (reportPeriod === 'kustom') {
-      startDate = customDate.start ? startOfDay(new Date(customDate.start)) : startOfDay(now);
-      endDate = customDate.end ? endOfDay(new Date(customDate.end)) : endOfDay(now);
-    }
-
-    const filtered = finData.filter(tx => {
-      if (tx.isVoid) return false;
-      // Membaca waktu input sebagai basis rekaman kasir/penjualan
-      const txDate = new Date(tx.waktuInput);
-      return txDate >= startDate && txDate <= endDate;
-    });
-
-    let sumNetto = 0, sumKamar = 0, sumEkstra = 0, sumDiskon = 0;
-    filtered.forEach(tx => {
-      const k = tx.pembayaran?.jumlahKamar || 0;
-      const e = (tx.pembayaran?.tambahan || []).reduce((s, i) => s + i.jumlah, 0);
-      const d = tx.pembayaran?.diskon || 0;
-      sumKamar += k;
-      sumEkstra += e;
-      sumDiskon += d;
-      sumNetto += (k + e - d);
-    });
-
-    return {
-      filteredFinData: filtered,
-      finStats: { netto: sumNetto, kamar: sumKamar, ekstra: sumEkstra, diskon: sumDiskon, count: filtered.length }
-    };
-  }, [finData, reportPeriod, customDate, isFinancialModalOpen]);
-  // [END: Effects]
-
-  // [START: PricingLogic]
   const resolvePrice = (targetDate, roomType, bookingChannel) => {
     const targetMD = format(targetDate, 'MM-dd'); 
     const isWeekend = weekendDays.includes(targetDate.getDay());
@@ -215,9 +156,7 @@ useEffect(() => {
     }
     return { harga: finalPrice || 0, jenis: rateLabel };
   };
-  // [END: PricingLogic]
 
-  // [START: DashboardExportLogic]
   const requestSort = (key) => {
     let direction = 'asc';
     if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
@@ -225,94 +164,6 @@ useEffect(() => {
   };
   const getSortIndicator = (key) => sortConfig.key !== key ? '↕️' : (sortConfig.direction === 'asc' ? '⬆️' : '⬇️');
 
-  const openFinancialModal = async () => { 
-    try {
-      const res = await fetch('http://localhost:5000/api/data');
-      const data = await res.json();
-      
-      const guests = data.guests || [];
-      const attachGuestData = (tx) => {
-        const g = guests.find(g => g.guestId === tx.guestId) || guests.find(g => (g.nama || '').toLowerCase() === (tx.nama || '').toLowerCase()) || {};
-        let jk = tx.jenisKelamin;
-        if (!jk || jk === '-' || jk === '') jk = g.jenisKelamin;
-        if (!jk || jk === '-' || jk === '') jk = 'Tidak Diisi';
-        return { ...tx, jenisKelamin: jk };
-      };
-
-      const allTx = [
-        ...(data.dailyTransactions || []).map(tx => attachGuestData({ ...tx, type: 'harian' })), 
-        ...(data.activeKost || []).map(k => attachGuestData({ ...k, type: 'kos' }))
-      ];
-      // Setir data ke state, biarkan useEffect yang memotong sesuai filter
-      setFinData(allTx);
-      setIsFinancialModalOpen(true);
-    } catch (error) { console.error(error); alert("Gagal memuat data keuangan."); }
-  };
-
-  const handleExportExcel = () => { 
-    // Menggunakan filteredFinData (Bukan semua data) agar ekspor sesuai dengan UI Dashboard
-    const sortedData = [...filteredFinData].sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput));
-    const padHour = String(rolloverHour).padStart(2, '0');
-    
-    if(sortedData.length === 0) return alert("Tidak ada transaksi pada periode ini untuk diekspor.");
-
-    const rows = sortedData.map(tx => {
-      const isVoid = tx.isVoid === true;
-      const total = isVoid ? 0 : (tx.pembayaran?.jumlahKamar || 0) + (tx.pembayaran?.tambahan || []).reduce((s, i) => s + i.jumlah, 0) - (tx.pembayaran?.diskon || 0);
-      
-      let wMasuk, wKeluar;
-      if (tx.type === 'harian') { wMasuk = new Date(tx.checkIn); wKeluar = new Date(tx.checkOut); } 
-      else { wMasuk = new Date(tx.periodeStart); wKeluar = new Date((tx.periodeEnd || format(new Date(), 'yyyy-MM-dd')) + `T${padHour}:00:00`); }
-      
-      let bCash = 0, bQRIS = 0, bTransfer = 0;
-      if (!isVoid) {
-        if (tx.pembayaran?.detailMetodeKamar?.length > 0) {
-          tx.pembayaran.detailMetodeKamar.forEach(m => { const met = m.metode.toLowerCase(); if (met.includes('cash')) bCash += m.nominal; else if (met.includes('qris')) bQRIS += m.nominal; else if (met.includes('transfer')) bTransfer += m.nominal; });
-        } else {
-          const met = (tx.pembayaran?.metodeKamar || '').toLowerCase(); if (met.includes('cash')) bCash += total; else if (met.includes('qris')) bQRIS += total; else if (met.includes('transfer')) bTransfer += total;
-        }
-      }
-
-      return {
-        'ID Transaksi': tx.id, 
-        'Status Data': isVoid ? 'BATAL (VOID)' : 'Valid',
-        'Tipe': tx.tipeInap ? toTitleCase(tx.tipeInap) : (tx.type === 'kos' ? 'Kos' : 'Harian'), 
-        'Nama Tamu': tx.nama, 
-        'Jenis Kelamin': (tx.jenisKelamin && tx.jenisKelamin !== '-') ? tx.jenisKelamin : 'Tidak Diisi', 
-        'No. Kamar': tx.noKamar || tx.roomNumber, 
-        'Tanggal Input Sistem': format(new Date(tx.waktuInput), 'yyyy-MM-dd HH:mm'),
-        'Tanggal Check In': !isNaN(wMasuk) ? format(wMasuk, 'yyyy-MM-dd') : '-', 
-        'Jam Check In': !isNaN(wMasuk) ? format(wMasuk, 'HH:mm') : '-', 
-        'Tanggal Check Out': !isNaN(wKeluar) ? format(wKeluar, 'yyyy-MM-dd') : '-', 
-        'Jam Check Out': !isNaN(wKeluar) ? format(wKeluar, 'HH:mm') : '-', 
-        'Diskon (Rp)': isVoid ? 0 : (tx.pembayaran?.diskon || 0),
-        'Total Tagihan Netto (Rp)': total, 
-        'Cash (Rp)': bCash || '', 
-        'QRIS (Rp)': bQRIS || '', 
-        'Transfer (Rp)': bTransfer || '', 
-        'Nominal Deposit (Rp)': isVoid ? 0 : (tx.pembayaran?.jumlahDeposit || ''), 
-        'Status Deposit': isVoid ? 'Dikembalikan (Void)' : (tx.statusDeposit === 'Sudah Refund' ? 'Sudah Dikembalikan' : (tx.statusDeposit || 'Belum Refund')),
-        'Metode Refund Deposit': isVoid ? '-' : (tx.depositRefundMethod || (tx.statusDeposit === 'Sudah Refund' ? 'Cash (Legacy)' : '-')),
-        'Alasan Deposit Hangus / Void': isVoid ? tx.voidReason : (tx.depositHangusReason || '-')
-      };
-    });
-    
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const objectMaxLength = [];
-    if (rows.length > 0) {
-      const keys = Object.keys(rows[0]);
-      for (let i = 0; i < keys.length; i++) { let maxLen = keys[i].length; for (let j = 0; j < rows.length; j++) { const val = rows[j][keys[i]]; if (val && val.toString().length > maxLen) maxLen = val.toString().length; } objectMaxLength.push({ wch: maxLen + 2 }); } worksheet['!cols'] = objectMaxLength;
-    }
-    const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, worksheet, "Rekap Penjualan"); 
-    
-    let fileName = `Laporan_Keuangan_${toTitleCase(reportPeriod)}`;
-    if(reportPeriod === 'kustom') fileName += `_${customDate.start}_to_${customDate.end}`;
-    
-    XLSX.writeFile(workbook, `${fileName}.xlsx`);
-  };
-  // [END: DashboardExportLogic]
-
-  // [START: CheckOutLogic]
   const handleOpenCheckout = (tx) => {
     setCheckoutModal({ isOpen: true, data: tx });
     setCoStatusDeposit(tx.statusDeposit === 'Belum Refund' ? 'Sudah Dikembalikan' : (tx.statusDeposit || 'Sudah Dikembalikan'));
@@ -321,7 +172,10 @@ useEffect(() => {
   };
 
   const prosesCheckout = async () => {
-    if (coStatusDeposit === 'Deposit Hangus' && !coAlasanHangus) return alert("Mohon isi alasan mengapa deposit dihanguskan (Cth: Denda/Kotor).");
+    if (coStatusDeposit === 'Deposit Hangus' && !coAlasanHangus) {
+      await alert("Mohon isi alasan mengapa deposit dihanguskan (Cth: Denda/Kotor).", "Informasi Tidak Lengkap");
+      return;
+    }
     setIsSaving(true);
     try {
       const getRes = await fetch('http://localhost:5000/api/data');
@@ -357,23 +211,86 @@ useEffect(() => {
 
       if (isUpdated) {
         await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-        alert("Tamu berhasil di Check-Out!");
+        toast("Tamu berhasil di Check-Out!", "success");
         setCheckoutModal({ isOpen: false, data: null });
         fetchData(); 
       }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan jaringan saat menyimpan data.", "Error"); 
+    } finally { setIsSaving(false); }
   };
-  // [END: CheckOutLogic]
 
-  // [START: VoidLogic]
+  const prosesUndoCheckout = async (txData) => {
+    const pic = await prompt(`Silakan masukkan Nama Petugas (PIC) untuk Log Audit:`, `Batalkan Check-Out tamu ${txData.nama}?`);
+    if (!pic) return;
+
+    setIsSaving(true);
+    try {
+      const getRes = await fetch('http://localhost:5000/api/data');
+      const dbData = await getRes.json();
+      let isUpdated = false;
+
+      const cleanInfo = (infoStr) => {
+        if(!infoStr) return '';
+        return infoStr.split(' | [Deposit')[0];
+      };
+      
+      const undoLog = `[Undo C/O by ${pic} pada ${format(new Date(), 'dd/MM/yy HH:mm')}]`;
+
+      if (txData.type === 'harian') {
+        const idx = (dbData.dailyTransactions || []).findIndex(t => t.id === txData.id);
+        if (idx !== -1) {
+          const durasiMalam = txData.pembayaran?.rincianTarifHarian?.length || 1;
+          let baseDate = new Date(txData.checkIn);
+          if(baseDate.getHours() < rolloverHour) baseDate = subDays(baseDate, 1);
+          
+          let origCO = addDays(baseDate, durasiMalam);
+          origCO.setHours(rolloverHour, 0, 0, 0);
+
+          dbData.dailyTransactions[idx].checkOut = format(origCO, "yyyy-MM-dd'T'HH:mm");
+          dbData.dailyTransactions[idx].statusDeposit = 'Belum Refund';
+          dbData.dailyTransactions[idx].depositRefundMethod = '';
+          dbData.dailyTransactions[idx].depositHangusReason = '';
+          dbData.dailyTransactions[idx].info = cleanInfo(txData.info) ? `${cleanInfo(txData.info)} | ${undoLog}` : undoLog;
+          isUpdated = true;
+        }
+      } else {
+        const idx = (dbData.activeKost || []).findIndex(t => t.id === txData.id);
+        if (idx !== -1) {
+          dbData.activeKost[idx].statusDeposit = 'Belum Refund';
+          dbData.activeKost[idx].depositRefundMethod = '';
+          dbData.activeKost[idx].depositHangusReason = '';
+          dbData.activeKost[idx].info = cleanInfo(txData.info) ? `${cleanInfo(txData.info)} | ${undoLog}` : undoLog;
+          isUpdated = true;
+        }
+      }
+
+      if (isUpdated) {
+         await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
+         toast("Tamu kembali berstatus In-House.", "success");
+         fetchData();
+      }
+    } catch(err) { 
+      console.error(err); 
+      await alert("Terjadi kesalahan jaringan saat memproses permintaan.", "Error"); 
+    }
+    finally { setIsSaving(false); }
+  };
+
   const handleOpenVoid = (tx) => {
     setVoidModal({ isOpen: true, data: tx });
     setVoidReason('');
   };
 
   const prosesVoid = async () => {
-    if (!voidReason.trim()) return alert("Alasan pembatalan (Void) wajib diisi untuk log audit akuntansi.");
-    if (!window.confirm("PERINGATAN: Transaksi yang di-void akan dinolkan pendapatannya dan dibebaskan kamarnya. Lanjutkan?")) return;
+    if (!voidReason.trim()) {
+      await alert("Alasan pembatalan (Void) wajib diisi untuk log audit akuntansi.", "Data Tidak Lengkap");
+      return;
+    }
+
+    const isConfirmed = await confirm("PERINGATAN: Transaksi yang di-void akan dinolkan pendapatannya dan dibebaskan kamarnya. Tindakan ini permanen. Lanjutkan?", "Konfirmasi Void");
+    if (!isConfirmed) return;
     
     setIsSaving(true);
     try {
@@ -402,20 +319,72 @@ useEffect(() => {
 
       if (isUpdated) {
         await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-        alert("Transaksi berhasil dibatalkan (VOID).");
+        toast("Transaksi berhasil dibatalkan (VOID).", "success");
         setVoidModal({ isOpen: false, data: null });
         fetchData();
       }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan jaringan saat menyimpan data.", "Error"); 
+    } finally { setIsSaving(false); }
   };
-  // [END: VoidLogic]
 
-  // [START: RoomTransferLogic]
   const handleSelectRoomTransfer = async (kamarBaru, tipeBaru) => {
     const txData = transferModal.data;
     const oldRoom = txData.noKamar || txData.roomNumber;
+    const oldTipe = txData.type === 'harian' ? txData.tipeKamar : txData.roomType;
     
-    if (!window.confirm(`Pindahkan tamu ${txData.nama} dari Kamar #${oldRoom} ke Kamar #${kamarBaru}?`)) return;
+    let selisihHarga = 0;
+    
+    if (oldTipe !== tipeBaru) {
+      if (txData.type === 'kos') {
+        const oldHarga = hargaDinamis.kos?.[oldTipe] || 0;
+        const newHarga = hargaDinamis.kos?.[tipeBaru] || 0;
+        selisihHarga = newHarga - oldHarga;
+      } else if (txData.tipeInap === 'transit') {
+        let effectiveDate = new Date(txData.checkIn);
+        if (effectiveDate.getHours() < rolloverHour) effectiveDate = subDays(effectiveDate, 1);
+        const isTransitWeekend = weekendDays.includes(effectiveDate.getDay());
+        const oldHarga = isTransitWeekend ? (hargaDinamis.transitWeekend?.[oldTipe] || 0) : (hargaDinamis.transitWeekday?.[oldTipe] || 0);
+        const newHarga = isTransitWeekend ? (hargaDinamis.transitWeekend?.[tipeBaru] || 0) : (hargaDinamis.transitWeekday?.[tipeBaru] || 0);
+        
+        const ci = new Date(txData.checkIn);
+        const co = new Date(txData.checkOut);
+        const hours = Math.abs(co - ci) / 36e5;
+        const multiplier = Math.max(1, Math.ceil(hours / 6));
+        selisihHarga = (newHarga - oldHarga) * multiplier;
+      } else if (txData.type === 'harian') {
+        let baseDate = new Date();
+        if (baseDate.getHours() < rolloverHour) baseDate = subDays(baseDate, 1);
+        baseDate.setHours(rolloverHour, 0, 0, 0);
+
+        let checkOutDate = new Date(txData.checkOut);
+        let currentDate = new Date(baseDate);
+        
+        let ciDate = new Date(txData.checkIn);
+        if (ciDate.getHours() < rolloverHour) ciDate = subDays(ciDate, 1);
+        ciDate.setHours(rolloverHour, 0, 0, 0);
+        
+        if (currentDate < ciDate) currentDate = new Date(ciDate);
+
+        while (currentDate < checkOutDate) {
+          const { harga: oldH } = resolvePrice(currentDate, oldTipe, txData.bookingBy);
+          const { harga: newH } = resolvePrice(currentDate, tipeBaru, txData.bookingBy);
+          selisihHarga += (newH - oldH);
+          currentDate = addDays(currentDate, 1);
+        }
+      }
+    }
+
+    let confirmMsg = `Pindahkan tamu ${txData.nama} dari Kamar #${oldRoom} ke Kamar #${kamarBaru}?`;
+    if (selisihHarga > 0) {
+        confirmMsg += `\n\n⚠️ PERHATIAN: Tipe kamar baru lebih mahal!\nTagihan tamu akan BERTAMBAH sebesar Rp ${selisihHarga.toLocaleString('id-ID')} untuk sisa masa inap.`;
+    } else if (selisihHarga < 0) {
+        confirmMsg += `\n\n⚠️ PERHATIAN: Tipe kamar baru lebih murah!\nTagihan tamu akan BERKURANG sebesar Rp ${Math.abs(selisihHarga).toLocaleString('id-ID')} untuk sisa masa inap.`;
+    }
+
+    const isConfirmed = await confirm(confirmMsg, "Konfirmasi Pindah Kamar");
+    if (!isConfirmed) return;
     
     setIsSaving(true);
     try {
@@ -423,13 +392,34 @@ useEffect(() => {
       const dbData = await getRes.json();
       
       let isUpdated = false;
-      const note = `[Pindah dari Kamar #${oldRoom} ke Kamar #${kamarBaru}]`;
+      let note = `[Pindah dari #${oldRoom} ke #${kamarBaru}]`;
+      if (selisihHarga !== 0) {
+         note += ` [Koreksi Tarif: ${selisihHarga > 0 ? '+' : ''}${selisihHarga}]`;
+      }
 
       if (txData.type === 'harian') {
         const idx = (dbData.dailyTransactions || []).findIndex(t => t.id === txData.id);
         if (idx !== -1) {
           dbData.dailyTransactions[idx].noKamar = kamarBaru;
           dbData.dailyTransactions[idx].tipeKamar = tipeBaru;
+          
+          if (selisihHarga !== 0) {
+             dbData.dailyTransactions[idx].pembayaran.jumlahKamar += selisihHarga;
+             if (dbData.dailyTransactions[idx].pembayaran.rincianTarifHarian) {
+                let baseDate = new Date();
+                if (baseDate.getHours() < rolloverHour) baseDate = subDays(baseDate, 1);
+                baseDate.setHours(rolloverHour, 0, 0, 0);
+
+                dbData.dailyTransactions[idx].pembayaran.rincianTarifHarian.forEach(rt => {
+                    const rtDate = new Date(rt.tanggal);
+                    if (rtDate >= baseDate) {
+                        const { harga: newH } = resolvePrice(rtDate, tipeBaru, txData.bookingBy);
+                        rt.harga = newH;
+                    }
+                });
+             }
+          }
+          
           dbData.dailyTransactions[idx].info = dbData.dailyTransactions[idx].info ? `${dbData.dailyTransactions[idx].info} | ${note}` : note;
           isUpdated = true;
         }
@@ -438,6 +428,9 @@ useEffect(() => {
         if (idx !== -1) {
           dbData.activeKost[idx].roomNumber = kamarBaru;
           dbData.activeKost[idx].roomType = tipeBaru;
+          if (selisihHarga !== 0) {
+             dbData.activeKost[idx].pembayaran.jumlahKamar += selisihHarga;
+          }
           dbData.activeKost[idx].info = dbData.activeKost[idx].info ? `${dbData.activeKost[idx].info} | ${note}` : note;
           isUpdated = true;
         }
@@ -445,15 +438,19 @@ useEffect(() => {
 
       if (isUpdated) {
         await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-        alert("Pindah kamar berhasil disimpan.");
+        toast("Pindah kamar & harga berhasil disesuaikan.", "success");
+        if(selisihHarga !== 0) {
+            await alert("Tagihan kamar telah berubah. Pastikan Anda mengklik ikon Kartu (💳) pada transaksi ini untuk menyesuaikan Metode Pembayaran agar selisihnya balance!", "Perhatian Kasir");
+        }
         setTransferModal({ isOpen: false, data: null });
         fetchData();
       }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan saat memindahkan kamar."); } finally { setIsSaving(false); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan saat memindahkan kamar.", "Error"); 
+    } finally { setIsSaving(false); }
   };
-  // [END: RoomTransferLogic]
 
-  // [START: EditExtendLogic]
   const handleEditClick = (tx) => {
     setEditModal({ isOpen: true, data: tx });
     setTransitExtendCount(0); 
@@ -527,7 +524,10 @@ useEffect(() => {
   };
 
   const simpanPerubahan = async () => {
-    if (!editWaktuKeluar || !editNoKamar) return alert("Mohon lengkapi Waktu Keluar dan Nomor Kamar.");
+    if (!editWaktuKeluar || !editNoKamar) {
+      await alert("Mohon lengkapi Waktu Keluar dan Nomor Kamar.", "Validasi Gagal");
+      return;
+    }
     setIsSaving(true);
     try {
       const getRes = await fetch('http://localhost:5000/api/data');
@@ -590,15 +590,16 @@ useEffect(() => {
 
       if (isUpdated) {
         await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-        alert("Perubahan & Tagihan Extend berhasil direkam.");
+        toast("Perubahan & Tagihan Extend berhasil direkam.", "success");
         setEditModal({ isOpen: false, data: null });
         fetchData();
       }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan jaringan saat menyimpan perubahan.", "Error"); 
+    } finally { setIsSaving(false); }
   };
-  // [END: EditExtendLogic]
 
-  // [START: PaymentCorrectionLogic]
   const handleOpenPayment = (tx) => {
     setPaymentModal({ isOpen: true, data: tx });
     setPayDiskon(tx.pembayaran?.diskon || 0);
@@ -641,7 +642,10 @@ useEffect(() => {
   const paySelisihKamar = payNettoKamar - payTotalDibayarKamar;
 
   const prosesPayment = async () => {
-    if (paySelisihKamar !== 0) return alert(`❌ Nominal pelunasan KAMAR tidak seimbang! (Selisih: Rp ${paySelisihKamar.toLocaleString('id-ID')})`);
+    if (paySelisihKamar !== 0) {
+      await alert(`Nominal pelunasan KAMAR tidak seimbang! (Selisih: Rp ${paySelisihKamar.toLocaleString('id-ID')})`, "Validasi Gagal");
+      return;
+    }
     
     setIsSaving(true);
     try {
@@ -669,30 +673,46 @@ useEffect(() => {
 
       if (isUpdated) {
         await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
-        alert("Koreksi pembayaran berhasil disimpan.");
+        toast("Koreksi pembayaran berhasil disimpan.", "success");
         setPaymentModal({ isOpen: false, data: null });
         fetchData();
       }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan jaringan saat menyimpan koreksi.", "Error"); 
+    } finally { setIsSaving(false); }
   };
-  // [END: PaymentCorrectionLogic]
 
   const padHour = String(rolloverHour).padStart(2, '0');
 
   const filteredTx = transactions.filter(tx => {
     const matchName = (tx.nama || '').toLowerCase().includes((searchTerm || '').toLowerCase());
     const matchRoom = (tx.noKamar || tx.roomNumber || '').toString().includes(searchTerm || '');
+    
     let dateMatch = true;
-    if (dateFilter) { const txDate = tx.type === 'harian' ? new Date(tx.checkIn) : new Date(tx.periodeStart); dateMatch = !isNaN(txDate) && format(txDate, 'yyyy-MM-dd') === dateFilter; }
+    if (dateFilter.start && dateFilter.end) { 
+      const txDate = tx.type === 'harian' ? new Date(tx.checkIn) : new Date(tx.periodeStart); 
+      const fStart = startOfDay(new Date(dateFilter.start));
+      const fEnd = endOfDay(new Date(dateFilter.end));
+      dateMatch = !isNaN(txDate) && txDate >= fStart && txDate <= fEnd;
+    }
     
     let statusMatch = true;
     if (statusFilter === 'Dibatalkan') {
       statusMatch = tx.isVoid === true;
+    } else if (statusFilter === 'Deposit Tertahan') {
+      const now = new Date(); 
+      const coDate = tx.type === 'harian' ? new Date(tx.checkOut) : new Date((tx.periodeEnd || format(now, 'yyyy-MM-dd')) + `T${padHour}:00:00`);
+      statusMatch = !tx.isVoid && tx.statusDeposit === 'Belum Refund' && !isNaN(coDate) && now > coDate;
     } else {
       if (tx.isVoid) statusMatch = false; 
       else {
-        const now = new Date(); const coDate = tx.type === 'harian' ? new Date(tx.checkOut) : new Date((tx.periodeEnd || format(now, 'yyyy-MM-dd')) + `T${padHour}:00:00`);
-        if (!isNaN(coDate)) { if (statusFilter === 'Aktif') statusMatch = now <= coDate; else if (statusFilter === 'Selesai') statusMatch = now > coDate; }
+        const now = new Date(); 
+        const coDate = tx.type === 'harian' ? new Date(tx.checkOut) : new Date((tx.periodeEnd || format(now, 'yyyy-MM-dd')) + `T${padHour}:00:00`);
+        if (!isNaN(coDate)) { 
+          if (statusFilter === 'Aktif') statusMatch = now <= coDate; 
+          else if (statusFilter === 'Selesai') statusMatch = now > coDate; 
+        }
       }
     }
     return (matchName || matchRoom) && dateMatch && statusMatch;
@@ -711,14 +731,12 @@ useEffect(() => {
     return timeB - timeA;
   });
 
-  // [START: Render]
   return (
     <>
       <div className={`space-y-6 text-gray-900 transition-colors duration-300 print:hidden ${printData ? 'hidden' : 'block'}`}>
         
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
           <div><h2 className="text-2xl font-bold text-gray-800">Riwayat Transaksi</h2><p className="text-sm text-gray-500 mt-1">Daftar histori inap tamu Harian, Transit, dan Kos.</p></div>
-          <button onClick={openFinancialModal} className="bg-purple-600 hover:bg-purple-700 text-white px-5 py-2.5 rounded-lg font-bold shadow-md flex items-center gap-2"><span>📈</span> Laporan Finansial</button>
         </div>
 
         {unresolvedList.length > 0 && (
@@ -731,10 +749,19 @@ useEffect(() => {
           </div>
         )}
 
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col md:flex-row gap-4">
-          <div className="flex-1"><input type="text" placeholder="Cari nama tamu atau no. kamar..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500" /></div>
-          <div className="w-full md:w-48"><input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500" /></div>
-          <div className="w-full md:w-48"><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500"><option value="Semua">Semua Status</option><option value="Aktif">Tamu Aktif (In-House)</option><option value="Selesai">Sudah Check-Out</option><option value="Dibatalkan">🚫 Void / Batal</option></select></div>
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col md:flex-row gap-4 items-center">
+          <div className="flex-1 w-full"><input type="text" placeholder="Cari nama tamu atau no. kamar..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500" /></div>
+          
+          <div className="flex items-center gap-2 w-full md:w-auto">
+            <div className="w-full md:w-40"><CustomDateTimePicker value={dateFilter.start} onChange={(val) => setDateFilter({...dateFilter, start: val})} /></div>
+            <span className="text-gray-400 font-bold">-</span>
+            <div className="w-full md:w-40"><CustomDateTimePicker value={dateFilter.end} onChange={(val) => setDateFilter({...dateFilter, end: val})} alignRight={true} /></div>
+            {(dateFilter.start || dateFilter.end) && (
+               <button onClick={() => setDateFilter({start: '', end: ''})} className="bg-gray-200 text-gray-600 hover:bg-gray-300 p-2 rounded-lg font-bold text-sm" title="Clear Filter Tanggal">&times;</button>
+            )}
+          </div>
+          
+          <div className="w-full md:w-48"><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full bg-transparent border border-gray-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-green-500 font-bold text-gray-700"><option value="Semua">Semua Status</option><option value="Aktif">Tamu Aktif (In-House)</option><option value="Selesai">Sudah Check-Out</option><option value="Deposit Tertahan">⚠️ Deposit Tertahan</option><option value="Dibatalkan">🚫 Void / Batal</option></select></div>
         </div>
 
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -764,6 +791,16 @@ useEffect(() => {
                     
                     const isAktif = new Date() <= wKeluar;
                     const needsCheckout = !tx.isVoid && (isAktif || tx.statusDeposit === 'Belum Refund');
+                    const isCheckedOut = !tx.isVoid && !isAktif && tx.statusDeposit !== 'Belum Refund';
+                    
+                    let canUndo = false;
+                    if (isCheckedOut) {
+                      const realCOTime = tx.type === 'harian' ? new Date(tx.checkOut) : new Date(tx.periodeEnd + `T${padHour}:00:00`);
+                      const diffInHours = (new Date() - realCOTime) / (1000 * 60 * 60);
+                      if (diffInHours <= 24 && diffInHours >= 0) { 
+                        canUndo = true;
+                      }
+                    }
                     
                     return (
                       <tr key={tx.id} className={`transition-colors ${tx.isVoid ? 'bg-red-50/50 opacity-70' : 'hover:bg-green-50/30'}`}>
@@ -787,17 +824,21 @@ useEffect(() => {
                         <td className="p-4 text-center">
                           <div className="flex justify-center gap-2">
                             <button onClick={() => setPrintData(tx)} className="bg-gray-800 hover:bg-black text-white p-2 rounded shadow-sm transition-colors text-sm" title="Cetak Struk">🖨️</button>
+                            
                             {needsCheckout && (<button onClick={() => handleOpenCheckout(tx)} className={`bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded shadow-sm transition-colors text-sm font-bold flex items-center gap-1 shadow-red-600/30 ${!isAktif ? 'animate-pulse' : ''}`} title="Check-Out Tamu">🚪 C/O</button>)}
                             
-                            {!tx.isVoid && isAktif && (
+                            {canUndo && (<button onClick={() => prosesUndoCheckout(tx)} className="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded shadow-sm transition-colors text-sm font-bold flex items-center gap-1" title="Batalkan Check-Out (Undo)">↩️ Undo C/O</button>)}
+
+                            {!tx.isVoid && needsCheckout && (
                               <button onClick={() => setTransferModal({ isOpen: true, data: tx })} className="bg-orange-500 hover:bg-orange-600 text-white p-2 rounded shadow-sm transition-colors text-sm" title="Pindah Kamar (Room Transfer)">🔄</button>
                             )}
 
-                            {!tx.isVoid && (
+                            {!tx.isVoid && needsCheckout && (
                               <button onClick={() => handleOpenPayment(tx)} className="bg-emerald-600 hover:bg-emerald-700 text-white p-2 rounded shadow-sm transition-colors text-sm" title="Koreksi Data Pembayaran">💳</button>
                             )}
 
-                            {!tx.isVoid && (<button onClick={() => handleEditClick(tx)} className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded shadow-sm transition-colors text-sm" title="Edit / Extend">⚙️</button>)}
+                            {!tx.isVoid && needsCheckout && (<button onClick={() => handleEditClick(tx)} className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded shadow-sm transition-colors text-sm" title="Edit / Extend">⚙️</button>)}
+                            
                             {!tx.isVoid && (<button onClick={() => handleOpenVoid(tx)} className="bg-red-50 hover:bg-red-100 text-red-600 p-2 rounded transition-colors text-sm" title="Batalkan Transaksi (Void)">🚫</button>)}
                           </div>
                         </td>
@@ -828,7 +869,6 @@ useEffect(() => {
                   <h3 className="text-3xl font-black">Rp {payGrossTotal.toLocaleString('id-ID')}</h3>
                 </div>
 
-                {/* Sesi 1: Pembayaran Kamar */}
                 <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                   <div className="mb-3 border-b border-gray-100 pb-3 flex justify-between items-center">
                     <div>
@@ -868,7 +908,6 @@ useEffect(() => {
                   </div>
                 </div>
 
-                {/* Sesi 2: Pembayaran Tambahan */}
                 {payTambahan.length > 0 && (
                   <div className="bg-orange-50 p-4 rounded-xl border border-orange-200 shadow-sm">
                     <div className="flex justify-between items-center mb-3">
@@ -882,6 +921,7 @@ useEffect(() => {
                           <select value={t.metode} onChange={(e) => setPayTambahan(payTambahan.map(item => item.id === t.id ? { ...item, metode: e.target.value } : item))} className="w-1/2 border border-orange-200 rounded p-1.5 text-sm outline-none focus:ring-1 focus:ring-orange-500 bg-orange-50 font-bold text-orange-800">
                             <option value="Cash">Cash</option><option value="Transfer">Transfer</option><option value="QRIS">QRIS</option><option value="Debit/Kredit">Debit/Kredit</option>
                           </select>
+                          <button onClick={() => setPayTambahan(payTambahan.filter(item => item.id !== t.id))} className="text-red-500 font-bold hover:bg-red-50 px-2 rounded-md transition-colors h-full flex items-center justify-center text-xl" title="Hapus Tagihan Ekstra ini">&times;</button>
                         </div>
                       ))}
                     </div>
@@ -1048,11 +1088,19 @@ useEffect(() => {
                   ) : editModal.data.type === 'harian' && (
                     <div className="col-span-1">
                       <label className="block text-sm font-bold text-gray-700 mb-1">Durasi</label>
-                      <input type="number" min="1" value={editDurasiMalam} onChange={(e) => { const v = parseInt(e.target.value) || 1; setEditDurasiMalam(v); hitungUlangKeluarHarian(v); }} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold text-blue-700" />
+                      <input type="number" min="1" value={editDurasiMalam} onChange={(e) => { const v = parseInt(e.target.value) || 1; setEditDurasiMalam(v); hitungUlangKeluarHarian(v); }} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold text-blue-700 h-[42px]" />
                     </div>
                   )}
                   
-                  <div className={editModal.data.type === 'kos' ? "col-span-4" : "col-span-3"}><label className="block text-sm font-bold text-gray-700 mb-1">Waktu Keluar (Check-Out)</label>{editModal.data.type === 'kos' ? (<input type="date" value={editWaktuKeluar} onChange={(e) => setEditWaktuKeluar(e.target.value)} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-blue-500" />) : (<input type="datetime-local" value={editWaktuKeluar} onChange={(e) => setEditWaktuKeluar(e.target.value)} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-blue-500" />)}</div>
+                  <div className={editModal.data.type === 'kos' ? "col-span-4" : "col-span-3"}>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">Waktu Keluar (Check-Out)</label>
+                    <CustomDateTimePicker 
+                      value={editWaktuKeluar} 
+                      onChange={(val) => setEditWaktuKeluar(val)} 
+                      includeTime={editModal.data.type !== 'kos'} 
+                      readOnly={editModal.data.type === 'kos'}
+                    />
+                  </div>
                 </div>
 
                 {((editModal.data.type === 'harian' && editDurasiMalam > originalDurasi) || (editModal.data.tipeInap === 'transit' && transitExtendCount > 0)) && (
@@ -1073,73 +1121,6 @@ useEffect(() => {
               <div className="p-5 border-t border-gray-100 flex justify-end gap-3 bg-white">
                 <button onClick={() => setEditModal({ isOpen: false, data: null })} className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-lg font-bold hover:bg-gray-200 transition-colors">Batal</button>
                 <button onClick={simpanPerubahan} disabled={isSaving} className="px-6 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md transition-colors">{isSaving ? 'Menyimpan...' : 'Simpan Perubahan'}</button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* MODAL DASBOR FINANSIAL & EXPORT BARU */}
-        {isFinancialModalOpen && (
-          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden animate-fade-in flex flex-col max-h-[90vh]">
-              <div className="p-5 bg-purple-700 text-white flex justify-between items-center shrink-0">
-                <div>
-                  <h3 className="font-bold text-lg">📈 Dasbor Analitik Keuangan</h3>
-                  <p className="text-xs text-purple-200 mt-1">Pantau performa penjualan dan ekspor laporan kasir.</p>
-                </div>
-                <button onClick={() => setIsFinancialModalOpen(false)} className="text-white/70 hover:text-white font-bold text-2xl outline-none">&times;</button>
-              </div>
-              
-              <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-gray-50/50">
-                {/* FILTER SECTION */}
-                <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                  <div className="flex bg-gray-100 p-1 rounded-lg">
-                    {['harian', 'mingguan', 'bulanan', 'kustom'].map(p => (
-                      <button key={p} onClick={() => setReportPeriod(p)} className={`px-4 py-1.5 text-sm font-bold rounded-md capitalize transition-colors ${reportPeriod === p ? 'bg-purple-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200'}`}>{p}</button>
-                    ))}
-                  </div>
-                  
-                  {reportPeriod === 'kustom' && (
-                    <div className="flex items-center gap-2 animate-fade-in">
-                      <input type="date" value={customDate.start} onChange={(e) => setCustomDate({...customDate, start: e.target.value})} className="border border-gray-300 rounded p-1.5 text-sm outline-none focus:border-purple-500 font-bold text-gray-700" />
-                      <span className="text-gray-400 text-sm font-bold">-</span>
-                      <input type="date" value={customDate.end} onChange={(e) => setCustomDate({...customDate, end: e.target.value})} className="border border-gray-300 rounded p-1.5 text-sm outline-none focus:border-purple-500 font-bold text-gray-700" />
-                    </div>
-                  )}
-                </div>
-
-                {/* DASHBOARD CARDS */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="md:col-span-3 bg-gradient-to-br from-purple-700 to-purple-900 p-6 rounded-xl shadow-lg text-white text-center border border-purple-800">
-                     <p className="text-sm font-bold text-purple-200 uppercase tracking-widest mb-2">Total Pendapatan Bersih (Netto)</p>
-                     <h4 className="text-5xl font-black mb-2 tracking-tight">Rp {finStats.netto.toLocaleString('id-ID')}</h4>
-                     <p className="text-xs text-purple-300 font-medium">Berdasarkan {finStats.count} transaksi valid pada rentang waktu ini (Void dikecualikan).</p>
-                  </div>
-
-                  <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center items-center relative overflow-hidden">
-                     <div className="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
-                     <p className="text-xs font-bold text-gray-500 uppercase mb-2">Penjualan Kamar Kotor</p>
-                     <h4 className="text-2xl font-black text-gray-800">Rp {finStats.kamar.toLocaleString('id-ID')}</h4>
-                  </div>
-                  <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center items-center relative overflow-hidden">
-                     <div className="absolute top-0 left-0 w-full h-1 bg-orange-500"></div>
-                     <p className="text-xs font-bold text-gray-500 uppercase mb-2">Tagihan Tambahan Kotor</p>
-                     <h4 className="text-2xl font-black text-orange-600">Rp {finStats.ekstra.toLocaleString('id-ID')}</h4>
-                  </div>
-                  <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-center items-center relative overflow-hidden">
-                     <div className="absolute top-0 left-0 w-full h-1 bg-red-500"></div>
-                     <p className="text-xs font-bold text-gray-500 uppercase mb-2">Total Potongan Diskon</p>
-                     <h4 className="text-2xl font-black text-red-600">- Rp {finStats.diskon.toLocaleString('id-ID')}</h4>
-                  </div>
-                </div>
-
-              </div>
-
-              <div className="p-5 border-t border-gray-200 flex flex-col sm:flex-row justify-between items-center gap-4 bg-white shrink-0">
-                 <p className="text-xs text-gray-500 text-center sm:text-left">Laporan Excel akan memuat <strong>{finStats.count} data transaksi</strong><br/>yang sesuai dengan filter periode aktif.</p>
-                 <button onClick={handleExportExcel} className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white font-extrabold px-6 py-3 rounded-xl shadow-md transition-transform active:scale-[0.98] flex items-center justify-center gap-2">
-                   <span className="text-xl">📊</span> UNDUH EXCEL (.XLSX)
-                 </button>
               </div>
             </div>
           </div>

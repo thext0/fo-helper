@@ -1,9 +1,14 @@
+// [START: DatabasePelangganModule]
 import { useState, useEffect } from 'react';
 import { DAFTAR_KOTA_INDONESIA } from '../data/kotaIndonesia';
+import { useDialog } from './DialogProvider';
+import CustomDateTimePicker from './CustomDateTimePicker';
 
 const toTitleCase = (str) => str.toLowerCase().replace(/\b\w/g, s => s.toUpperCase());
 
 export default function DatabasePelanggan() {
+  const { alert, toast } = useDialog();
+
   const [loading, setLoading] = useState(true);
   const [semuaPelanggan, setSemuaPelanggan] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -33,7 +38,6 @@ export default function DatabasePelanggan() {
           ...(data.activeKost || []).map(kos => ({ ...kos, dbType: 'kos' }))
         ].sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput));
 
-        // MIGRASI OTOMATIS: Jika tabel guests belum ada, buat dari histori transaksi
         if (!data.guests) {
             const map = new Map();
             rawData.forEach(item => {
@@ -65,7 +69,6 @@ export default function DatabasePelanggan() {
             guests = Array.from(map.values());
             data.guests = guests;
             
-            // Suntikkan guestId ke transaksi lama
             (data.dailyTransactions || []).forEach(tx => {
                 const key = (tx.nama || '').toLowerCase().trim();
                 if (map.has(key)) tx.guestId = map.get(key).guestId;
@@ -78,16 +81,13 @@ export default function DatabasePelanggan() {
             needSave = true;
         }
 
-        // Kalkulasi riwayat inap per guest
         const guestsWithHistory = guests.map(g => {
             const riwayat = rawData.filter(tx => tx.guestId === g.guestId || (tx.nama || '').toLowerCase().trim() === (g.nama || '').toLowerCase().trim());
             return { ...g, totalKunjungan: riwayat.length, riwayatInap: riwayat };
         });
 
         if (needSave) {
-            await fetch('http://localhost:5000/api/data/save', { 
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) 
-            });
+            await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
         }
 
         guestsWithHistory.sort((a, b) => {
@@ -123,9 +123,16 @@ export default function DatabasePelanggan() {
 
       const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
       const result = await postRes.json();
-      if (result.success) { setEditingBerkas(null); setRefreshTrigger(prev => prev + 1); } 
-      else { alert("Gagal menyimpan berkas: " + result.error); }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+      if (result.success) { 
+        setEditingBerkas(null); 
+        setRefreshTrigger(prev => prev + 1); 
+        toast("Biodata berhasil diperbarui!", "success");
+      } 
+      else { await alert("Gagal menyimpan berkas: " + result.error, "Error"); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan jaringan.", "Error"); 
+    } finally { setIsSaving(false); }
   };
 
   const filteredPelanggan = semuaPelanggan.filter(p => 
@@ -173,19 +180,11 @@ export default function DatabasePelanggan() {
                         {p.nama} {p.jenisKelamin && p.jenisKelamin.toLowerCase().includes('laki') ? '♂️' : p.jenisKelamin && p.jenisKelamin.toLowerCase().includes('perempuan') ? '♀️' : p.jenisKelamin && p.jenisKelamin.toLowerCase().includes('lain') ? '⚪' : <span className="text-[10px] text-red-400 italic font-normal ml-1">(Gender Kosong)</span>}
                       </div>
                       <div className="mt-1 flex flex-wrap gap-2">
-                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-800 shadow-sm">
-                          ID: {p.guestId}
-                        </span>
-                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-100 text-purple-700 shadow-sm border border-purple-200">
-                          {p.totalKunjungan} Kunjungan
-                        </span>
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-800 shadow-sm">ID: {p.guestId}</span>
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-100 text-purple-700 shadow-sm border border-purple-200">{p.totalKunjungan} Kunjungan</span>
                       </div>
                     </td>
-                    <td className="p-4">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span>📱</span> <span className="font-medium text-gray-800">{p.noTelp || <span className="text-gray-400 italic">Kosong</span>}</span>
-                      </div>
-                    </td>
+                    <td className="p-4"><div className="flex items-center gap-2 mb-1"><span>📱</span> <span className="font-medium text-gray-800">{p.noTelp || <span className="text-gray-400 italic">Kosong</span>}</span></div></td>
                     <td className="p-4">
                       <div className="font-mono text-xs text-gray-600 mb-1">NIK: <span className="font-bold text-gray-800">{p.nik || '-'}</span></div>
                       <div className="text-xs text-gray-500 truncate max-w-[200px]">📍 {p.tamuDari || 'Kota Asal Kosong'}</div>
@@ -202,15 +201,11 @@ export default function DatabasePelanggan() {
         </div>
       </div>
 
-      {/* POPUP: MODAL BERKAS IDENTITAS */}
       {editingBerkas && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="p-5 bg-blue-800 text-white flex justify-between items-center shrink-0">
-              <div>
-                <h3 className="font-bold text-lg">📄 Form Register Tamu</h3>
-                <p className="text-xs text-blue-200">Lengkapi data untuk keperluan administrasi dan keamanan.</p>
-              </div>
+              <div><h3 className="font-bold text-lg">📄 Form Register Tamu</h3><p className="text-xs text-blue-200">Lengkapi data untuk keperluan administrasi dan keamanan.</p></div>
               <button onClick={() => setEditingBerkas(null)} className="text-blue-300 hover:text-white font-bold text-2xl transition-colors">&times;</button>
             </div>
             
@@ -223,10 +218,7 @@ export default function DatabasePelanggan() {
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Jenis Kelamin</label>
                   <select value={editForm.jenisKelamin || ''} onChange={(e) => setEditForm({...editForm, jenisKelamin: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm">
-                    <option value="" disabled hidden>- Pilih -</option>
-                    <option value="Laki-laki">Laki-laki ♂️</option>
-                    <option value="Perempuan">Perempuan ♀️</option>
-                    <option value="Lain-lain">Lain-lain ⚪</option>
+                    <option value="" disabled hidden>- Pilih -</option><option value="Laki-laki">Laki-laki ♂️</option><option value="Perempuan">Perempuan ♀️</option><option value="Lain-lain">Lain-lain ⚪</option>
                   </select>
                 </div>
                 <div>
@@ -235,7 +227,11 @@ export default function DatabasePelanggan() {
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Tanggal Lahir</label>
-                  <input type="date" value={editForm.tanggalLahir || ''} onChange={(e) => setEditForm({...editForm, tanggalLahir: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"/>
+                  {/* REVISI: Menggunakan CustomDateTimePicker */}
+                  <CustomDateTimePicker 
+                    value={editForm.tanggalLahir || ''} 
+                    onChange={(val) => setEditForm({...editForm, tanggalLahir: val})} 
+                  />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Nomor WhatsApp Aktif</label>
@@ -259,7 +255,6 @@ export default function DatabasePelanggan() {
                   <label className="block text-xs font-bold text-gray-700 mb-1">Alamat Domisili / Tempat Tinggal Lengkap</label>
                   <textarea rows="3" value={editForm.alamatLengkap || ''} onChange={(e) => setEditForm({...editForm, alamatLengkap: e.target.value})} className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm" placeholder="Contoh: Perum. Anggrek Blok B No. 12, RT 01/RW 02..."></textarea>
                   
-                  {/* SECTION: RIWAYAT KUNJUNGAN */}
                   <div className="sm:col-span-2 pt-4 mt-2 border-t border-gray-200">
                     <label className="block text-sm font-bold text-gray-800 mb-3">📅 Rekam Jejak Kunjungan ({editingBerkas.totalKunjungan} Kali)</label>
                     <div className="max-h-40 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
@@ -275,24 +270,18 @@ export default function DatabasePelanggan() {
                           if (tglSelesai) {
                             const isAktif = new Date(tglSelesai) > new Date();
                             teksTanggal = isAktif ? `${strMulai} s/d Sekarang` : `${strMulai} - ${formatStr(tglSelesai)}`;
-                          } else {
-                            teksTanggal = strMulai;
-                          }
+                          } else { teksTanggal = strMulai; }
                         }
 
                         return (
                           <div key={riwayat.id || idx} className="bg-gray-50 p-3 rounded-lg border border-gray-200 shadow-sm flex justify-between items-center text-xs">
                             <div className="flex flex-col gap-1">
-                              <span className="font-bold text-gray-700">
-                                {isKos ? 'Kos Bulanan' : 'Harian / Transit'} <span className="text-blue-600">#{riwayat.noKamar || riwayat.roomNumber}</span>
-                              </span>
+                              <span className="font-bold text-gray-700">{isKos ? 'Kos Bulanan' : 'Harian / Transit'} <span className="text-blue-600">#{riwayat.noKamar || riwayat.roomNumber}</span></span>
                               <span className="text-gray-500">ID: {riwayat.id}</span>
                             </div>
                             <div className="text-right flex flex-col gap-1">
                               <span className="font-bold text-gray-800">{teksTanggal}</span>
-                              <span className="text-[10px] text-gray-400 font-medium">
-                                {riwayat.pembayaran?.jumlahKamar ? `Rp ${riwayat.pembayaran.jumlahKamar.toLocaleString('id-ID')}` : '-'}
-                              </span>
+                              <span className="text-[10px] text-gray-400 font-medium">{riwayat.pembayaran?.jumlahKamar ? `Rp ${riwayat.pembayaran.jumlahKamar.toLocaleString('id-ID')}` : '-'}</span>
                             </div>
                           </div>
                         );
@@ -311,7 +300,6 @@ export default function DatabasePelanggan() {
         </div>
       )}
 
-      {/* MODAL KOTA (DIPANGGIL DARI DALAM MODAL BERKAS) */}
       {isCityModalOpen && (
         <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[80vh]">
@@ -326,3 +314,4 @@ export default function DatabasePelanggan() {
     </div>
   );
 }
+// [END: DatabasePelangganModule]

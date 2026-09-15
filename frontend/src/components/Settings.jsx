@@ -1,7 +1,10 @@
 // [START: SettingsModule]
 import { useState, useEffect } from 'react';
+import { useDialog } from './DialogProvider';
 
-export default function Settings({ onClose }) {
+export default function Settings() {
+  const { alert } = useDialog();
+
   // [START: StateManagement]
   const [activeTab, setActiveTab] = useState('finansial');
   const [isSaving, setIsSaving] = useState(false);
@@ -47,7 +50,6 @@ export default function Settings({ onClose }) {
         
         const s = db.settings || {};
         
-        // Load Finansial
         setOtaListUI((s.otaList || []).map(ota => ({ id: Math.random().toString(), nama: ota })));
         setDeposit(s.depositDefault || 0);
         setWeekendDays(s.weekendDays !== undefined ? s.weekendDays : [5, 6, 0]);
@@ -59,13 +61,8 @@ export default function Settings({ onClose }) {
           kos: s.prices?.kos || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 }
         });
 
-        // Load Rate Management
-        setRateManagement(s.rateManagement || {
-          channels: {},
-          calendarRules: { specialDates: [], dateRanges: [] }
-        });
+        setRateManagement(s.rateManagement || { channels: {}, calendarRules: { specialDates: [], dateRanges: [] } });
 
-        // Load Inventaris (Migrasi otomatis jika data lama)
         if (s.floors && s.floors.length > 0) {
           setFloors(s.floors);
         } else if (s.rooms) {
@@ -74,11 +71,8 @@ export default function Settings({ onClose }) {
             s.rooms[tipe].forEach(no => migratedKamar.push({ id: Math.random().toString(), no, tipe }));
           });
           setFloors([{ id: 'fl-1', nama: 'Lantai 1', kamar: migratedKamar }]);
-        } else {
-          setFloors([]);
-        }
+        } else { setFloors([]); }
 
-        // Load Operasional & Master Ekstra
         setRolloverTime(s.rolloverTime || '12:00');
         setMasterExtraUI((s.masterExtraCharges || []).map(ext => ({ id: Math.random().toString(), nama: ext.nama, harga: ext.harga })));
 
@@ -89,14 +83,10 @@ export default function Settings({ onClose }) {
   // [END: Effects]
 
   // [START: Handlers]
-  const handleHargaChange = (kategori, tipe, value) => {
-    setHarga(prev => ({ ...prev, [kategori]: { ...prev[kategori], [tipe]: Number(value) } }));
-  };
-
+  const handleHargaChange = (kategori, tipe, value) => setHarga(prev => ({ ...prev, [kategori]: { ...prev[kategori], [tipe]: Number(value) } }));
   const addFloor = () => setFloors([...floors, { id: Date.now().toString(), nama: `Lantai ${floors.length + 1}`, kamar: [] }]);
   const updateFloorName = (id, nama) => setFloors(floors.map(f => f.id === id ? { ...f, nama } : f));
   const removeFloor = (id) => setFloors(floors.filter(f => f.id !== id));
-
   const addRoom = (floorId) => setFloors(floors.map(f => f.id === floorId ? { ...f, kamar: [...f.kamar, { id: Date.now().toString(), no: '', tipe: 'double-bed' }] } : f));
   const updateRoom = (floorId, roomId, field, value) => setFloors(floors.map(f => f.id === floorId ? { ...f, kamar: f.kamar.map(k => k.id === roomId ? { ...k, [field]: value } : k) } : f));
   const removeRoom = (floorId, roomId) => setFloors(floors.map(f => f.id === floorId ? { ...f, kamar: f.kamar.filter(k => k.id !== roomId) } : f));
@@ -124,16 +114,9 @@ export default function Settings({ onClose }) {
       const totalRoomsCalc = { 'double-bed': totalDouble, 'twin-bed': totalTwin, 'single-bed': totalSingle };
 
       const newSettings = { 
-        otaList, 
-        depositDefault: Number(deposit), 
-        prices: harga, 
-        weekendDays, 
-        floors, 
-        rooms: roomsArray, 
-        totalRooms: totalRoomsCalc, 
-        rateManagement,
-        rolloverTime,
-        masterExtraCharges
+        otaList, depositDefault: Number(deposit), prices: harga, weekendDays, 
+        floors, rooms: roomsArray, totalRooms: totalRoomsCalc, rateManagement,
+        rolloverTime, masterExtraCharges
       };
       
       const updatedDb = { ...dataAwal, settings: newSettings };
@@ -141,23 +124,29 @@ export default function Settings({ onClose }) {
       const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedDb) });
       const resData = await postRes.json();
       if (resData.success) {
-        alert('Pengaturan berhasil disimpan! Halaman akan dimuat ulang agar data sinkron.');
+        await alert('Pengaturan berhasil disimpan! Sistem akan memuat ulang halaman agar pengaturan segera sinkron.', 'Tersimpan');
         window.location.reload();
-      } else { alert('Gagal menyimpan pengaturan.'); }
-    } catch (err) { console.error(err); alert('Terjadi kesalahan jaringan.'); } finally { setIsSaving(false); }
+      } else { await alert('Gagal menyimpan pengaturan.', 'Error Simpan'); }
+    } catch (err) { 
+      console.error(err); 
+      await alert('Terjadi kesalahan jaringan saat menyimpan.', 'Error Sistem'); 
+    } finally { setIsSaving(false); }
   };
   // [END: Handlers]
 
   // [START: Render]
   return (
-    <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4 animate-fade-in">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95vh]">
-        
-        <div className="p-5 bg-gray-800 text-white flex justify-between items-center shrink-0">
-          <div><h2 className="text-xl font-bold">⚙️ Pengaturan Sistem</h2><p className="text-xs text-gray-300">Manajemen Finansial, Inventaris & Operasional</p></div>
-          <button onClick={onClose} className="text-gray-400 hover:text-white font-bold text-2xl transition-colors">&times;</button>
+    <div className="space-y-6 animate-fade-in pb-10">
+      
+      <div className="bg-white p-4 rounded-md shadow-sm border border-gray-200 flex flex-col md:flex-row justify-between items-center gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-gray-800">⚙️ Pengaturan Sistem</h2>
+          <p className="text-sm text-gray-500">Manajemen Finansial, Inventaris & Operasional</p>
         </div>
+      </div>
 
+      <div className="bg-white rounded-md shadow-sm border border-gray-200 overflow-hidden flex flex-col">
+        
         {/* TAB NAVIGATION */}
         <div className="flex border-b border-gray-200 shrink-0 bg-gray-50 overflow-x-auto hide-scrollbar">
           <button onClick={() => setActiveTab('finansial')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'finansial' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>💰 Finansial Dasar</button>
@@ -166,7 +155,7 @@ export default function Settings({ onClose }) {
           <button onClick={() => setActiveTab('operasional')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'operasional' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>⚙️ Operasional & Ekstra</button>
         </div>
 
-        <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-gray-50">
+        <div className="p-6 space-y-6 bg-gray-50">
           
           {/* TAB 1: FINANSIAL */}
           {activeTab === 'finansial' && (
@@ -473,8 +462,7 @@ export default function Settings({ onClose }) {
         </div>
 
         <div className="p-4 bg-white border-t border-gray-200 flex justify-end gap-3 shrink-0">
-          <button onClick={onClose} className="px-5 py-2.5 bg-gray-100 border border-gray-300 text-gray-700 rounded-md font-bold text-sm transition-colors hover:bg-gray-200">Tutup Batal</button>
-          <button onClick={handleSimpan} disabled={isSaving} className={`px-6 py-2.5 text-white rounded-md font-bold text-sm shadow-md transition-colors ${isSaving ? 'bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+          <button onClick={handleSimpan} disabled={isSaving} className={`px-8 py-3 text-white rounded-lg font-bold shadow-md transition-colors ${isSaving ? 'bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
             {isSaving ? 'Menyimpan...' : '💾 Simpan Pengaturan'}
           </button>
         </div>

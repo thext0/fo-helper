@@ -2,6 +2,10 @@
 import { useState, useEffect } from 'react';
 import { addDays, addHours, addMonths, format, subDays, isSameDay } from 'date-fns';
 import { DAFTAR_KOTA_INDONESIA } from '../data/kotaIndonesia';
+import { useDialog } from './DialogProvider';
+
+// IMPORT KALENDER CUSTOM BARU
+import CustomDateTimePicker from './CustomDateTimePicker';
 
 // [START: Helpers]
 const roomTypeLabels = {
@@ -53,13 +57,13 @@ const formatDiskonLabel = (diskonNominal, hargaKamarAwal) => {
 // [END: Helpers]
 
 export default function FormCheckIn() {
+  const { alert, toast } = useDialog();
+
   // [START: StateManagement]
   const [rolloverHour, setRolloverHour] = useState(12);
   const [masterExtraList, setMasterExtraList] = useState([]);
   
-  // State untuk Dropdown Master Extra Charges
   const [activeExtraDropdown, setActiveExtraDropdown] = useState(null);
-
   const [tipeInap, setTipeInap] = useState('harian'); 
 
   const initSekarang = new Date();
@@ -154,7 +158,7 @@ export default function FormCheckIn() {
       } catch (error) { console.error("Gagal memuat pengaturan:", error); } finally { setIsLoadingSettings(false); }
     };
     fetchSettings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -369,7 +373,6 @@ export default function FormCheckIn() {
 
   const tambahBiaya = () => setTambahanList([...tambahanList, { id: generateTimestamp(), nama: '', metode: 'Transfer', jumlah: 0 }]);
   
-  // Custom Handler untuk Extra Charge
   const updateBiaya = (id, field, value) => {
     setTambahanList(tambahanList.map(item => item.id === id ? { ...item, [field]: value } : item));
   };
@@ -383,23 +386,36 @@ export default function FormCheckIn() {
   const totalBayarKamar = detailMetodeKamar.reduce((sum, item) => sum + (Number(item.nominal) || 0), 0);
   const selisihBayar = totalTagihanNetto - totalBayarKamar;
 
-  const copyToClipboard = () => { navigator.clipboard.writeText(previewText); alert("Teks laporan berhasil disalin!"); };
+  const copyToClipboard = () => { 
+    navigator.clipboard.writeText(previewText); 
+    toast("Teks laporan berhasil disalin!", "success"); 
+  };
   // [END: EventHandlers]
 
   // [START: SaveLogic]
   const handleSimpan = async () => {
-    if (!nama || !waktuMasuk || !noKamar) return alert("Mohon lengkapi Nama Tamu, Nomor Kamar, dan Waktu Masuk terlebih dahulu.");
+    if (!nama || !waktuMasuk || !noKamar) {
+      await alert("Mohon lengkapi Nama Tamu, Nomor Kamar, dan Waktu Masuk terlebih dahulu.", "Validasi Gagal");
+      return;
+    }
     
     if (totalBayarKamar !== totalTagihanNetto) {
-      return alert(`❌ Validasi Pembayaran Gagal!\n\nTotal Tagihan Netto: Rp ${totalTagihanNetto.toLocaleString('id-ID')}\nTotal Dibayar: Rp ${totalBayarKamar.toLocaleString('id-ID')}\n\nNominal yang diinput tidak sesuai! (Selisih: Rp ${selisihBayar.toLocaleString('id-ID')})`);
+      await alert(`❌ Validasi Pembayaran Gagal!\n\nTotal Tagihan Netto: Rp ${totalTagihanNetto.toLocaleString('id-ID')}\nTotal Dibayar: Rp ${totalBayarKamar.toLocaleString('id-ID')}\n\nNominal yang diinput tidak sesuai! (Selisih: Rp ${selisihBayar.toLocaleString('id-ID')})`, "Selisih Pembayaran");
+      return;
     }
 
     const nomorKamarBersih = noKamar.trim();
     const waktuCI = new Date(waktuMasuk);
     const waktuCO = new Date(waktuKeluar);
     
-    if (waktuCO <= waktuCI) return alert("LOGIKA BENTROK: Waktu Keluar tidak boleh mendahului waktu Masuk!");
-    if (waktuCI > new Date()) return alert("LOGIKA BENTROK: Waktu Masuk tidak boleh berada di masa depan atau melebihi waktu komputer saat ini!");
+    if (waktuCO <= waktuCI) {
+      await alert("LOGIKA BENTROK: Waktu Keluar tidak boleh mendahului waktu Masuk!", "Validasi Waktu");
+      return;
+    }
+    if (waktuCI > new Date()) {
+      await alert("LOGIKA BENTROK: Waktu Masuk tidak boleh berada di masa depan atau melebihi waktu komputer saat ini!", "Validasi Waktu");
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -425,7 +441,9 @@ export default function FormCheckIn() {
       });
 
       if (adaTamuHarianBentrok || adaTamuKosBentrok) {
-        setIsSaving(false); return alert(`PEMBERITAHUAN: Kamar #${nomorKamarBersih} TIDAK TERSEDIA. Masih ada Tamu Aktif di dalam rentang waktu tersebut!`);
+        setIsSaving(false); 
+        await alert(`PEMBERITAHUAN: Kamar #${nomorKamarBersih} TIDAK TERSEDIA. Masih ada Tamu Aktif di dalam rentang waktu tersebut!`, "Kamar Tidak Tersedia");
+        return;
       }
 
       let finalGuestId = guestId;
@@ -475,13 +493,16 @@ export default function FormCheckIn() {
       const result = await postRes.json();
       
       if (result.success) {
-        alert("Penerimaan Tamu Berhasil!");
+        toast("Tamu berhasil di-check-in-kan.", "success");
         setNama(''); setGuestId(''); setJenisKelamin(''); setNoKamar(''); 
         setTambahanList([]); setDiskon(0); setTipeDiskon('nominal');
         setDetailMetodeKamar([{ id: generateTimestamp(), metode: 'Cash', nominal: 0 }]); 
         setRefreshPreviewTrigger(prev => prev + 1); 
-      } else { alert("Gagal menyimpan: " + result.error); }
-    } catch (error) { console.error(error); alert("Terjadi kesalahan jaringan."); } finally { setIsSaving(false); }
+      } else { await alert("Gagal menyimpan: " + result.error, "Error Simpan"); }
+    } catch (error) { 
+      console.error(error); 
+      await alert("Terjadi kesalahan jaringan.", "Error Sistem"); 
+    } finally { setIsSaving(false); }
   };
   // [END: SaveLogic]
 
@@ -558,22 +579,27 @@ export default function FormCheckIn() {
 
           <div>
             <div className="flex justify-between items-end mb-1"><label className="block text-sm font-medium text-gray-700">Waktu Masuk (Check-In)</label><button type="button" onClick={setKeWaktuSekarang} className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded font-medium hover:bg-gray-300 transition-colors">⏱️ Set Waktu Saat Ini</button></div>
-            <input type="datetime-local" value={waktuMasuk} onChange={(e) => handleWaktuMasukChange(e.target.value)} className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" />
+            <CustomDateTimePicker 
+              value={waktuMasuk} 
+              onChange={(val) => handleWaktuMasukChange(val)} 
+              includeTime={true} 
+            />
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex gap-3 items-start">
             <div className="flex-1">
               <label className="block text-sm font-medium text-gray-700 mb-1">Waktu Keluar</label>
-              {tipeInap === 'kos' ? (
-                <input type="date" value={waktuKeluar.split('T')[0]} readOnly className="w-full border border-gray-300 rounded-md p-2 bg-gray-100 cursor-not-allowed" />
-              ) : (
-                <input type="datetime-local" value={waktuKeluar} onChange={(e) => setWaktuKeluar(e.target.value)} className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" />
-              )}
+              <CustomDateTimePicker 
+                value={waktuKeluar} 
+                onChange={(val) => setWaktuKeluar(val)} 
+                includeTime={tipeInap !== 'kos'} 
+                readOnly={tipeInap === 'kos'}
+              />
             </div>
             {tipeInap === 'harian' && (
               <div className="w-24 shrink-0">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Malam</label>
-                <input type="number" min="1" value={durasiMalam} onChange={handleDurasiMalamChange} className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 font-bold text-center" />
+                <input type="number" min="1" value={durasiMalam} onChange={handleDurasiMalamChange} className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 font-bold text-center h-[42px]" />
               </div>
             )}
           </div>
@@ -651,7 +677,6 @@ export default function FormCheckIn() {
                   placeholder="Ketik / Pilih..." 
                 />
                 
-                {/* CUSTOM DROPDOWN UNTUK MASTER EXTRA CHARGES */}
                 {activeExtraDropdown === item.id && (
                   <div className="absolute top-full left-0 z-40 w-72 mt-1 bg-white border border-orange-200 rounded-lg shadow-xl max-h-48 overflow-y-auto">
                     {masterExtraList.length === 0 ? (
@@ -802,7 +827,6 @@ export default function FormCheckIn() {
           </div>
           
           <div className="flex-1 overflow-auto flex justify-center py-8 print:!static print:!block print:!p-0 print:!m-0 print:!overflow-visible print:!h-auto print:!w-full">
-            {/* PENAMBAHAN KELAS .receipt-box */}
             <div className="bg-white w-full max-w-[195mm] min-h-[138mm] mx-auto p-6 shadow-2xl mb-10 print:!max-w-[195mm] print:!w-[195mm] print:!shadow-none print:!m-0 print:!p-0 print:!min-h-0 print:!h-auto flex flex-col font-sans text-sm print:text-[10px] relative receipt-box">
               <div className="border-b border-black pb-1 mb-3 print:mb-2 flex justify-between items-end"><div className="flex-shrink-0"><img src="/logo.png" alt="Greenhaus Inn" className="h-28 print:h-14 w-auto object-contain mix-blend-multiply" /></div><div className="text-right"><p className="text-sm print:text-[9px] font-medium text-gray-800 print:text-black leading-tight">Jl. Dinoyo No.86, Keputran, Surabaya</p><p className="text-sm print:text-[11px] font-extrabold uppercase mt-0.5 tracking-wide text-gray-900 print:text-black leading-tight">Tanda Terima Pembayaran</p></div></div>
               <div className="flex justify-between mb-6 print:mb-2">
