@@ -1,14 +1,21 @@
 // [START: SettingsModule]
 import { useState, useEffect } from 'react';
 import { useDialog } from './DialogProvider';
+import { useAppData } from '../context/DataProvider';
 
 export default function Settings() {
-  const { alert } = useDialog();
+  const { alert, toast } = useDialog();
+  const { data: dbData, loading: isDbLoading, refreshData } = useAppData();
+
+  // [START: Security Auth State]
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [adminPIN, setAdminPIN] = useState('123456'); // Default fallback PIN
+  // [END: Security Auth State]
 
   // [START: StateManagement]
   const [activeTab, setActiveTab] = useState('finansial');
   const [isSaving, setIsSaving] = useState(false);
-  const [dataAwal, setDataAwal] = useState(null);
 
   // Finansial & OTA
   const [otaListUI, setOtaListUI] = useState([]);
@@ -40,16 +47,15 @@ export default function Settings() {
   const [masterExtraUI, setMasterExtraUI] = useState([]);
   // [END: StateManagement]
 
-  // [START: Effects]
+  // [START: Synchronization Effect]
   useEffect(() => {
-    const fetchSettings = async () => {
-      try {
-        const res = await fetch('http://localhost:5000/api/data');
-        const db = await res.json();
-        setDataAwal(db);
+    if (dbData && dbData.settings) {
+      const timer = setTimeout(() => {
+        const s = dbData.settings;
         
-        const s = db.settings || {};
-        
+        // Sync Admin PIN
+        setAdminPIN(s.adminPIN || '123456');
+
         setOtaListUI((s.otaList || []).map(ota => ({ id: Math.random().toString(), nama: ota })));
         setDeposit(s.depositDefault || 0);
         setWeekendDays(s.weekendDays !== undefined ? s.weekendDays : [5, 6, 0]);
@@ -74,13 +80,32 @@ export default function Settings() {
         } else { setFloors([]); }
 
         setRolloverTime(s.rolloverTime || '12:00');
-        setMasterExtraUI((s.masterExtraCharges || []).map(ext => ({ id: Math.random().toString(), nama: ext.nama, harga: ext.harga })));
+        
+        setMasterExtraUI((s.masterExtraCharges || []).map(ext => ({ 
+          id: Math.random().toString(), 
+          nama: ext.nama, 
+          harga: ext.harga,
+          isMultiQty: ext.isMultiQty || false 
+        })));
+      }, 0);
 
-      } catch (err) { console.error(err); }
-    };
-    fetchSettings();
-  }, []);
-  // [END: Effects]
+      return () => clearTimeout(timer);
+    }
+  }, [dbData]);
+  // [END: Synchronization Effect]
+
+  // [START: Auth Handler]
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (pinInput === adminPIN) {
+      setIsAuthenticated(true);
+      toast("Akses Pengaturan diberikan.", "success");
+    } else {
+      alert("PIN Keamanan tidak valid! Hubungi Manajer atau Owner.", "Akses Ditolak");
+      setPinInput('');
+    }
+  };
+  // [END: Auth Handler]
 
   // [START: Handlers]
   const handleHargaChange = (kategori, tipe, value) => setHarga(prev => ({ ...prev, [kategori]: { ...prev[kategori], [tipe]: Number(value) } }));
@@ -92,10 +117,20 @@ export default function Settings() {
   const removeRoom = (floorId, roomId) => setFloors(floors.map(f => f.id === floorId ? { ...f, kamar: f.kamar.filter(k => k.id !== roomId) } : f));
 
   const handleSimpan = async () => {
+    if (!adminPIN || adminPIN.length < 4) {
+      await alert("PIN Keamanan harus minimal 4 karakter.", "Validasi Keamanan");
+      return;
+    }
+
     setIsSaving(true);
     try {
       const otaList = otaListUI.map(item => item.nama.trim()).filter(Boolean);
-      const masterExtraCharges = masterExtraUI.map(item => ({ nama: item.nama.trim(), harga: Number(item.harga) })).filter(item => item.nama !== '');
+      
+      const masterExtraCharges = masterExtraUI.map(item => ({ 
+        nama: item.nama.trim(), 
+        harga: Number(item.harga),
+        isMultiQty: !!item.isMultiQty
+      })).filter(item => item.nama !== '');
       
       const roomsArray = { 'double-bed': [], 'twin-bed': [], 'single-bed': [] };
       let totalDouble = 0, totalTwin = 0, totalSingle = 0;
@@ -114,18 +149,20 @@ export default function Settings() {
       const totalRoomsCalc = { 'double-bed': totalDouble, 'twin-bed': totalTwin, 'single-bed': totalSingle };
 
       const newSettings = { 
+        adminPIN, // Menyimpan PIN terbaru ke database
         otaList, depositDefault: Number(deposit), prices: harga, weekendDays, 
         floors, rooms: roomsArray, totalRooms: totalRoomsCalc, rateManagement,
         rolloverTime, masterExtraCharges
       };
       
-      const updatedDb = { ...dataAwal, settings: newSettings };
+      const updatedDb = JSON.parse(JSON.stringify(dbData));
+      updatedDb.settings = newSettings;
       
       const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedDb) });
       const resData = await postRes.json();
       if (resData.success) {
-        await alert('Pengaturan berhasil disimpan! Sistem akan memuat ulang halaman agar pengaturan segera sinkron.', 'Tersimpan');
-        window.location.reload();
+        refreshData(); 
+        await alert('Pengaturan berhasil disimpan! Sistem telah menyinkronkan data terbaru.', 'Tersimpan');
       } else { await alert('Gagal menyimpan pengaturan.', 'Error Simpan'); }
     } catch (err) { 
       console.error(err); 
@@ -134,7 +171,44 @@ export default function Settings() {
   };
   // [END: Handlers]
 
-  // [START: Render]
+  if (isDbLoading) return <div className="text-center p-10 font-medium text-gray-500">Memuat pengaturan sistem dari memori sentral...</div>;
+
+  // [START: Render Lock Screen]
+  if (!isAuthenticated) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh] animate-fade-in">
+        <div className="bg-white p-8 rounded-2xl shadow-xl border border-gray-100 max-w-sm w-full text-center">
+          <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 text-4xl shadow-inner">
+            🔒
+          </div>
+          <h2 className="text-2xl font-black text-gray-800 mb-2">Area Terbatas</h2>
+          <p className="text-sm text-gray-500 mb-6">Masukkan PIN Manajemen untuk mengakses dan mengubah pengaturan inti sistem.</p>
+          
+          <form onSubmit={handleLogin} className="space-y-4">
+            <input 
+              type="password" 
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              placeholder="••••••" 
+              className="w-full border-2 border-gray-200 rounded-xl p-4 text-center text-2xl tracking-[0.5em] font-black outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 transition-all"
+              autoFocus
+              required
+            />
+            <button 
+              type="submit" 
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-md transition-transform active:scale-[0.98]"
+            >
+              Buka Pengaturan
+            </button>
+          </form>
+          <p className="text-[10px] text-gray-400 mt-6">Default PIN awal adalah: 123456</p>
+        </div>
+      </div>
+    );
+  }
+  // [END: Render Lock Screen]
+
+  // [START: Render Settings UI]
   return (
     <div className="space-y-6 animate-fade-in pb-10">
       
@@ -143,6 +217,9 @@ export default function Settings() {
           <h2 className="text-xl font-bold text-gray-800">⚙️ Pengaturan Sistem</h2>
           <p className="text-sm text-gray-500">Manajemen Finansial, Inventaris & Operasional</p>
         </div>
+        <button onClick={() => { setIsAuthenticated(false); setPinInput(''); }} className="text-xs bg-red-50 text-red-600 hover:bg-red-100 font-bold px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
+          🔒 Kunci Kembali
+        </button>
       </div>
 
       <div className="bg-white rounded-md shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -152,7 +229,7 @@ export default function Settings() {
           <button onClick={() => setActiveTab('finansial')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'finansial' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>💰 Finansial Dasar</button>
           <button onClick={() => setActiveTab('inventaris')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'inventaris' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>🏨 Denah Kamar</button>
           <button onClick={() => setActiveTab('rate_management')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'rate_management' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>📅 Rate Management</button>
-          <button onClick={() => setActiveTab('operasional')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'operasional' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>⚙️ Operasional & Ekstra</button>
+          <button onClick={() => setActiveTab('operasional')} className={`flex-1 py-3 text-sm font-bold whitespace-nowrap px-4 transition-colors ${activeTab === 'operasional' ? 'text-blue-700 border-b-2 border-blue-700 bg-white' : 'text-gray-500 hover:bg-gray-100'}`}>⚙️ Operasi & Keamanan</button>
         </div>
 
         <div className="p-6 space-y-6 bg-gray-50">
@@ -410,10 +487,30 @@ export default function Settings() {
             </div>
           )}
 
-          {/* TAB 4: OPERASIONAL & EKSTRA (TAB BARU) */}
+          {/* TAB 4: OPERASIONAL, EKSTRA, & KEAMANAN */}
           {activeTab === 'operasional' && (
             <div className="space-y-6 animate-fade-in pb-8">
               
+              {/* [START: Security PIN Settings] */}
+              <div className="bg-white p-5 rounded-xl border-l-4 border-l-blue-600 shadow-sm flex flex-col md:flex-row gap-6 items-center">
+                <div className="flex-1">
+                  <h3 className="font-bold text-blue-800 flex items-center gap-2 mb-1"><span>🔑</span> Ganti PIN Keamanan</h3>
+                  <p className="text-xs text-gray-500 leading-relaxed">Ubah kode akses (PIN) yang digunakan untuk masuk ke halaman pengaturan ini. Pastikan hanya Manajer dan Pemilik yang mengetahui PIN ini.</p>
+                </div>
+                <div className="w-full md:w-64 shrink-0">
+                  <input 
+                    type="text" 
+                    value={adminPIN} 
+                    onChange={(e) => setAdminPIN(e.target.value.replace(/\D/g, ''))} 
+                    maxLength={10}
+                    className="w-full text-center border border-gray-300 bg-gray-50 p-3 rounded-lg font-bold text-lg tracking-[0.2em] outline-none focus:ring-2 focus:ring-blue-500 transition-all" 
+                    placeholder="PIN Baru..."
+                  />
+                  <p className="text-[10px] text-gray-400 mt-1 text-center">Hanya angka (Min. 4 digit)</p>
+                </div>
+              </div>
+              {/* [END: Security PIN Settings] */}
+
               <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex flex-col md:flex-row gap-6 items-center">
                 <div className="flex-1">
                   <h3 className="font-bold text-gray-800 flex items-center gap-2 mb-1"><span>🕒</span> Rollover Time (Batas Check-Out)</h3>
@@ -430,7 +527,7 @@ export default function Settings() {
                     <h3 className="font-bold text-gray-800 flex items-center gap-2 mb-1"><span>🛒</span> Master Data Extra Charges</h3>
                     <p className="text-xs text-gray-500">Buat *template* nama dan harga tagihan tambahan agar kasir tidak perlu mengetik berulang kali di form Check-In.</p>
                   </div>
-                  <button onClick={() => setMasterExtraUI([...masterExtraUI, { id: Date.now().toString(), nama: '', harga: 0 }])} className="text-xs bg-orange-100 hover:bg-orange-200 text-orange-700 px-4 py-2 rounded-lg font-bold transition-colors shadow-sm whitespace-nowrap">+ Tambah Item</button>
+                  <button onClick={() => setMasterExtraUI([...masterExtraUI, { id: Date.now().toString(), nama: '', harga: 0, isMultiQty: false }])} className="text-xs bg-orange-100 hover:bg-orange-200 text-orange-700 px-4 py-2 rounded-lg font-bold transition-colors shadow-sm whitespace-nowrap">+ Tambah Item</button>
                 </div>
 
                 <div className="space-y-3 max-h-80 overflow-y-auto pr-2">
@@ -439,14 +536,27 @@ export default function Settings() {
                   ) : (
                     masterExtraUI.map((item) => (
                       <div key={item.id} className="flex flex-col sm:flex-row gap-3 items-center bg-gray-50 p-3 rounded-lg border border-gray-200 hover:border-orange-300 transition-colors">
-                        <div className="w-full sm:w-1/2">
+                        <div className="w-full sm:w-2/5">
                           <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1 ml-1">Nama Item Tambahan</label>
                           <input type="text" value={item.nama} onChange={(e) => setMasterExtraUI(masterExtraUI.map(ext => ext.id === item.id ? { ...ext, nama: e.target.value } : ext))} placeholder="Cth: Extra Bed / Denda Telat / Minuman" className="w-full border border-gray-300 rounded-md p-2 text-sm outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500" />
                         </div>
-                        <div className="w-full sm:w-1/3">
+                        <div className="w-full sm:w-1/4">
                           <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1 ml-1">Harga Default (Rp)</label>
                           <input type="number" value={item.harga} onChange={(e) => setMasterExtraUI(masterExtraUI.map(ext => ext.id === item.id ? { ...ext, harga: Number(e.target.value) } : ext))} className="w-full border border-gray-300 rounded-md p-2 text-sm font-bold text-gray-700 outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500" />
                         </div>
+                        
+                        <div className="w-full sm:w-1/4 flex items-center mt-4 sm:mt-0 pt-3">
+                          <label className="flex items-center gap-2 text-xs font-bold text-gray-600 cursor-pointer">
+                            <input 
+                              type="checkbox" 
+                              checked={item.isMultiQty} 
+                              onChange={(e) => setMasterExtraUI(masterExtraUI.map(ext => ext.id === item.id ? { ...ext, isMultiQty: e.target.checked } : ext))} 
+                              className="w-4 h-4 rounded text-orange-600 focus:ring-orange-500" 
+                            />
+                            Bisa Multi-Qty
+                          </label>
+                        </div>
+
                         <div className="w-full sm:w-auto mt-4 sm:mt-0 flex justify-end">
                           <button onClick={() => setMasterExtraUI(masterExtraUI.filter(ext => ext.id !== item.id))} className="bg-red-100 text-red-600 w-10 h-10 flex items-center justify-center rounded-lg font-bold hover:bg-red-200 transition-colors" title="Hapus Item">&times;</button>
                         </div>
@@ -470,5 +580,6 @@ export default function Settings() {
       </div>
     </div>
   );
+  // [END: Render Settings UI]
 }
 // [END: SettingsModule]

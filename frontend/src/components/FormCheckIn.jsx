@@ -1,11 +1,10 @@
 // [START: FormCheckInModule]
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { addDays, addHours, addMonths, format, subDays, isSameDay } from 'date-fns';
 import { DAFTAR_KOTA_INDONESIA } from '../data/kotaIndonesia';
 import { useDialog } from './DialogProvider';
-
-// IMPORT KALENDER CUSTOM BARU
 import CustomDateTimePicker from './CustomDateTimePicker';
+import { useAppData } from '../context/DataProvider';
 
 // [START: Helpers]
 const roomTypeLabels = {
@@ -58,11 +57,124 @@ const formatDiskonLabel = (diskonNominal, hargaKamarAwal) => {
 
 export default function FormCheckIn() {
   const { alert, toast } = useDialog();
+  const { data: dbData, loading: isDbLoading, refreshData } = useAppData();
 
-  // [START: StateManagement]
-  const [rolloverHour, setRolloverHour] = useState(12);
-  const [masterExtraList, setMasterExtraList] = useState([]);
-  
+  // [START: Memory Derived States (Membasmi set-state-in-effect)]
+  const {
+    rolloverHour, masterExtraList, otaList, depositDefault,
+    hargaDinamis, weekendDays, rateManagement, floors, databaseTamu,
+    occupiedRooms, previewText
+  } = useMemo(() => {
+    if (!dbData) return {
+      rolloverHour: 12, masterExtraList: [], otaList: [], depositDefault: 0,
+      hargaDinamis: { harianWeekday: {}, harianWeekend: {}, transitWeekday: {}, transitWeekend: {}, kos: {} },
+      weekendDays: [5,6,0], rateManagement: { channels: {}, calendarRules: { specialDates: [], dateRanges: [] } },
+      floors: [], databaseTamu: [], occupiedRooms: [], previewText: 'Memuat laporan...'
+    };
+
+    const s = dbData.settings || {};
+    const rHour = parseInt((s.rolloverTime || '12:00').split(':')[0], 10);
+    const guests = dbData.guests || [];
+
+    const totalRooms = s.totalRooms || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 };
+    const sekarang = new Date();
+    const occ = []; 
+    const terisiCount = { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 };
+
+    const tamuHarianAktif = (dbData.dailyTransactions || []).filter(tx => {
+      if (!tx.checkIn || !tx.checkOut || tx.isVoid) return false;
+      const ci = new Date(tx.checkIn); const co = new Date(tx.checkOut);
+      if (sekarang <= co) { terisiCount[tx.tipeKamar] = (terisiCount[tx.tipeKamar] || 0) + 1; occ.push(tx.noKamar.toString().trim()); }
+      return (sekarang >= ci && sekarang <= co) || (sekarang > co && isSameDay(co, sekarang));
+    });
+
+    const tamuKosAktif = (dbData.activeKost || []).filter(kos => {
+      if (!kos.periodeStart || !kos.periodeEnd || kos.isVoid) return false;
+      const start = new Date(kos.periodeStart); start.setHours(rHour,0,0,0);
+      const end = new Date(kos.periodeEnd); end.setHours(rHour,0,0,0);
+      if (sekarang <= end) { terisiCount[kos.roomType] = (terisiCount[kos.roomType] || 0) + 1; occ.push(kos.roomNumber.toString().trim()); }
+      return (sekarang >= start && sekarang <= end) || (sekarang > end && isSameDay(end, sekarang));
+    });
+
+    const sisaDouble = Math.max(0, totalRooms['double-bed'] - (terisiCount['double-bed'] || 0));
+    const sisaTwin = Math.max(0, totalRooms['twin-bed'] - (terisiCount['twin-bed'] || 0));
+    const sisaSingle = Math.max(0, totalRooms['single-bed'] - (terisiCount['single-bed'] || 0));
+    const totalSisa = sisaDouble + sisaTwin + sisaSingle;
+
+    const namaHari = new Intl.DateTimeFormat('id-ID', { weekday: 'long' }).format(sekarang);
+    const tanggalLengkap = format(sekarang, 'dd/MM/yyyy');
+
+    let teks = `INFO BOOKING *Greenhaus Inn*\n\nHari ${namaHari}\n\nTanggal ${tanggalLengkap}\n\nBooking ${tamuHarianAktif.length} Kamar\n\n\n\n`;
+
+    tamuHarianAktif.forEach((tx, i) => {
+      const ciDate = new Date(tx.checkIn); const coDate = new Date(tx.checkOut);
+      const isSudahCO = sekarang > coDate;
+      let formattedCi = (tx.tipeInap === 'transit') ? format(ciDate, 'dd/MM/yy HH:mm') : format((ciDate.getHours() < rHour ? subDays(ciDate, 1) : ciDate), 'dd/MM/yy');
+      const formattedCo = tx.tipeInap === 'transit' ? format(coDate, 'dd/MM/yy HH:mm') : format(coDate, 'dd/MM/yy');
+      const hrgDep = (tx.pembayaran?.jumlahDeposit || 0).toLocaleString('id-ID');
+      
+      const diskonLabel = formatDiskonLabel(tx.pembayaran?.diskon, tx.pembayaran?.jumlahKamar);
+      let teksBayarKamar = (tx.pembayaran?.detailMetodeKamar && tx.pembayaran.detailMetodeKamar.length > 0) 
+        ? tx.pembayaran.detailMetodeKamar.map(m => `${m.metode} Rp ${Number(m.nominal).toLocaleString('id-ID')} ${diskonLabel}`).join(' + ')
+        : `${tx.pembayaran?.metodeKamar || '-'} Rp ${(tx.pembayaran?.jumlahKamar || 0).toLocaleString('id-ID')} ${diskonLabel}`;
+
+      let teksTambahan = '';
+      if (tx.pembayaran?.tambahan && tx.pembayaran.tambahan.length > 0) tx.pembayaran.tambahan.forEach(t => { 
+        const labelQty = t.qty > 1 ? `${t.qty}x ` : '';
+        teksTambahan += ` + ${t.metode} Rp ${(t.jumlah * (t.qty || 1)).toLocaleString('id-ID')} (${labelQty}${t.nama})`; 
+      });
+
+      let infoBersih = (tx.info || '-').split(' | [Deposit')[0];
+
+      teks += `${i + 1}. Nama Tamu : ${tx.nama}\nBooking By : ${tx.bookingBy}\nCheck-In : ${formattedCi}\nCheck-Out : ${formattedCo}\nRoom Type : ${roomTypeLabels[tx.tipeKamar] || tx.tipeKamar} #${tx.noKamar}\nPembayaran : ${teksBayarKamar} + ${tx.pembayaran?.metodeDeposit} Rp ${hrgDep} (Deposit)${teksTambahan}\nTamu dari : ${tx.tamuDari || '-'}\nInfo : *${isSudahCO ? `${infoBersih} - Sudah C/O, Kamar Ready` : infoBersih}*\n\n\n\n`;
+    });
+
+    teks += `Sisa Kamar : ${totalSisa} Kamar\n\n\n\nStandard Double Bed : ${sisaDouble}\nStandard Twin Bed : ${sisaTwin}\nStandard Single Bed : ${sisaSingle}\n\n\n\n-----\n\n\n\nKost :\n`;
+
+    tamuKosAktif.forEach((kos, i) => {
+      const num = (i + 1).toString().padStart(2, '0');
+      const start = format(new Date(kos.periodeStart), 'dd/MM/yyyy'); const end = format(new Date(kos.periodeEnd), 'dd/MM/yyyy');
+      const hrgDep = (kos.pembayaran?.jumlahDeposit || 0).toLocaleString('id-ID');
+      const endDateTime = new Date(kos.periodeEnd); endDateTime.setHours(rHour,0,0,0);
+      
+      const diskonLabel = formatDiskonLabel(kos.pembayaran?.diskon, kos.pembayaran?.jumlahKamar);
+      let teksBayarKamar = (kos.pembayaran?.detailMetodeKamar && kos.pembayaran.detailMetodeKamar.length > 0) 
+        ? kos.pembayaran.detailMetodeKamar.map(m => `${m.metode} Rp ${Number(m.nominal).toLocaleString('id-ID')} ${diskonLabel}`).join(' + ')
+        : `${kos.pembayaran?.metodeKamar || '-'} Rp ${(kos.pembayaran?.jumlahKamar || 0).toLocaleString('id-ID')} ${diskonLabel}`;
+
+      let teksTambahan = '';
+      if (kos.pembayaran?.tambahan && kos.pembayaran.tambahan.length > 0) kos.pembayaran.tambahan.forEach(t => { 
+        const labelQty = t.qty > 1 ? `${t.qty}x ` : '';
+        teksTambahan += ` + ${t.metode} Rp ${(t.jumlah * (t.qty || 1)).toLocaleString('id-ID')} (${labelQty}${t.nama})`; 
+      });
+
+      let infoBersih = (kos.info || '-').split(' | [Deposit')[0];
+
+      teks += `${num}. Nama : ${kos.nama}\nPeriode : ${start} - ${end}\nRoom Type : ${roomTypeLabels[kos.roomType] || kos.roomType} #${kos.roomNumber}\nPembayaran : ${teksBayarKamar} + ${kos.pembayaran?.metodeDeposit} Rp ${hrgDep} (Deposit)${teksTambahan}\nInfo : *${sekarang > endDateTime ? `${infoBersih} - Sudah C/O, Kamar Ready` : infoBersih}*\n\n`;
+    });
+
+    return {
+      rolloverHour: rHour,
+      masterExtraList: s.masterExtraCharges || [],
+      otaList: (s.otaList || []).map(ota => typeof ota === 'string' ? ota : ota.nama),
+      depositDefault: s.depositDefault || 0,
+      hargaDinamis: {
+        harianWeekday: s.prices?.harianWeekday || s.prices?.harian || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
+        harianWeekend: s.prices?.harianWeekend || s.prices?.harian || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
+        transitWeekday: s.prices?.transitWeekday || s.prices?.transit || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
+        transitWeekend: s.prices?.transitWeekend || s.prices?.transit || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
+        kos: s.prices?.kos || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 }
+      },
+      weekendDays: s.weekendDays !== undefined ? s.weekendDays : [5, 6, 0],
+      rateManagement: s.rateManagement || { channels: {}, calendarRules: { specialDates: [], dateRanges: [] } },
+      floors: s.floors || [],
+      databaseTamu: guests,
+      occupiedRooms: occ,
+      previewText: teks.trim()
+    };
+  }, [dbData]);
+  // [END: Memory Derived States]
+
   const [activeExtraDropdown, setActiveExtraDropdown] = useState(null);
   const [tipeInap, setTipeInap] = useState('harian'); 
 
@@ -72,9 +184,27 @@ export default function FormCheckIn() {
   const [nama, setNama] = useState('');
   const [jenisKelamin, setJenisKelamin] = useState(''); 
   const [guestId, setGuestId] = useState('');
+  const [noTelp, setNoTelp] = useState('');
+  const [tipeId, setTipeId] = useState('KTP');
+  const [nomorId, setNomorId] = useState('');
+
   const [waktuMasuk, setWaktuMasuk] = useState(initWaktuMasuk);
-  const [waktuKeluar, setWaktuKeluar] = useState(hitungWaktuKeluar(initWaktuMasuk, 'harian', 1, 12)); 
   const [durasiMalam, setDurasiMalam] = useState(1);
+  const [waktuKeluar, setWaktuKeluar] = useState(hitungWaktuKeluar(initWaktuMasuk, 'harian', 1, 12)); 
+  
+  // Sinkronisasi auto-checkout saat data rollover selesai dimuat dari memori
+  useEffect(() => {
+     // Dibungkus setTimeout agar asinkron & tidak memicu peringatan set-state-in-effect
+     const timer = setTimeout(() => {
+        setWaktuKeluar(prev => {
+           const calc = hitungWaktuKeluar(waktuMasuk, tipeInap, durasiMalam, rolloverHour);
+           return prev !== calc ? calc : prev; // Hanya update jika nilai benar-benar berubah
+        });
+     }, 0);
+     return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rolloverHour]);
+
   const [tipeKamar, setTipeKamar] = useState('double-bed');
   const [noKamar, setNoKamar] = useState('');
   
@@ -89,167 +219,19 @@ export default function FormCheckIn() {
   const [metodeDeposit, setMetodeDeposit] = useState('Cash');
   const [tambahanList, setTambahanList] = useState([]);
 
-  const [databaseTamu, setDatabaseTamu] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-
   const [isCityModalOpen, setIsCityModalOpen] = useState(false);
   const [citySearch, setCitySearch] = useState('');
   const [cityPage, setCityPage] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
-  const [isLoadingSettings, setIsLoadingSettings] = useState(true);
-  
-  const [otaList, setOtaList] = useState([]);
-  const [depositDefault, setDepositDefault] = useState(0);
-  
-  const [hargaDinamis, setHargaDinamis] = useState({ 
-    harianWeekday: {}, harianWeekend: {}, 
-    transitWeekday: {}, transitWeekend: {}, 
-    kos: {} 
-  });
-  const [weekendDays, setWeekendDays] = useState([5, 6, 0]);
-  const [rateManagement, setRateManagement] = useState({ channels: {}, calendarRules: { specialDates: [], dateRanges: [] } });
-
-  const [floors, setFloors] = useState([]);
-  const [occupiedRooms, setOccupiedRooms] = useState([]);
   const [isRoomModalOpen, setIsRoomModalOpen] = useState(false);
-
-  const [previewText, setPreviewText] = useState('Memuat laporan in-house terbaru...');
-  const [refreshPreviewTrigger, setRefreshPreviewTrigger] = useState(0);
-
   const [printData, setPrintData] = useState(null);
-  // [END: StateManagement]
 
-  // [START: Effects]
   useEffect(() => {
     const handleAfterPrint = () => setPrintData(null);
     window.addEventListener('afterprint', handleAfterPrint);
     return () => window.removeEventListener('afterprint', handleAfterPrint);
   }, []);
-
-  useEffect(() => {
-    const fetchSettings = async () => {
-      try {
-        const res = await fetch('http://localhost:5000/api/data');
-        if (res.ok) {
-          const data = await res.json();
-          const s = data.settings || {};
-          
-          const rHour = parseInt((s.rolloverTime || '12:00').split(':')[0], 10);
-          setRolloverHour(rHour);
-          setMasterExtraList(s.masterExtraCharges || []);
-          
-          setWaktuKeluar(hitungWaktuKeluar(waktuMasuk, tipeInap, durasiMalam, rHour));
-
-          setOtaList((s.otaList || []).map(ota => typeof ota === 'string' ? ota : ota.nama)); 
-          setDepositDefault(s.depositDefault || 0);
-          
-          setHargaDinamis({ 
-            harianWeekday: s.prices?.harianWeekday || s.prices?.harian || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
-            harianWeekend: s.prices?.harianWeekend || s.prices?.harian || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
-            transitWeekday: s.prices?.transitWeekday || s.prices?.transit || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
-            transitWeekend: s.prices?.transitWeekend || s.prices?.transit || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 },
-            kos: s.prices?.kos || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 }
-          });
-          setWeekendDays(s.weekendDays !== undefined ? s.weekendDays : [5, 6, 0]);
-          setFloors(s.floors || []);
-          setRateManagement(s.rateManagement || { channels: {}, calendarRules: { specialDates: [], dateRanges: [] } });
-          setDatabaseTamu(data.guests || []);
-        }
-      } catch (error) { console.error("Gagal memuat pengaturan:", error); } finally { setIsLoadingSettings(false); }
-    };
-    fetchSettings();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const buildPreview = async () => {
-      try {
-        const res = await fetch('http://localhost:5000/api/data');
-        if (!res.ok) throw new Error("Gagal ambil data preview");
-        const db = await res.json();
-        
-        const settings = db.settings || {};
-        const rHour = parseInt((settings.rolloverTime || '12:00').split(':')[0], 10);
-
-        const totalRooms = settings.totalRooms || { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 };
-        const sekarang = new Date();
-        const occ = []; 
-        const terisiCount = { 'double-bed': 0, 'twin-bed': 0, 'single-bed': 0 };
-
-        const tamuHarianAktif = (db.dailyTransactions || []).filter(tx => {
-          if (!tx.checkIn || !tx.checkOut || tx.isVoid) return false;
-          const ci = new Date(tx.checkIn); const co = new Date(tx.checkOut);
-          if (sekarang <= co) { terisiCount[tx.tipeKamar] = (terisiCount[tx.tipeKamar] || 0) + 1; occ.push(tx.noKamar.toString().trim()); }
-          return (sekarang >= ci && sekarang <= co) || (sekarang > co && isSameDay(co, sekarang));
-        });
-
-        const tamuKosAktif = (db.activeKost || []).filter(kos => {
-          if (!kos.periodeStart || !kos.periodeEnd || kos.isVoid) return false;
-          const start = new Date(kos.periodeStart); start.setHours(rHour,0,0,0);
-          const end = new Date(kos.periodeEnd); end.setHours(rHour,0,0,0);
-          if (sekarang <= end) { terisiCount[kos.roomType] = (terisiCount[kos.roomType] || 0) + 1; occ.push(kos.roomNumber.toString().trim()); }
-          return (sekarang >= start && sekarang <= end) || (sekarang > end && isSameDay(end, sekarang));
-        });
-
-        setOccupiedRooms(occ);
-
-        const sisaDouble = Math.max(0, totalRooms['double-bed'] - (terisiCount['double-bed'] || 0));
-        const sisaTwin = Math.max(0, totalRooms['twin-bed'] - (terisiCount['twin-bed'] || 0));
-        const sisaSingle = Math.max(0, totalRooms['single-bed'] - (terisiCount['single-bed'] || 0));
-        const totalSisa = sisaDouble + sisaTwin + sisaSingle;
-
-        const namaHari = new Intl.DateTimeFormat('id-ID', { weekday: 'long' }).format(sekarang);
-        const tanggalLengkap = format(sekarang, 'dd/MM/yyyy');
-
-        let teks = `INFO BOOKING *Greenhaus Inn*\n\nHari ${namaHari}\n\nTanggal ${tanggalLengkap}\n\nBooking ${tamuHarianAktif.length} Kamar\n\n\n\n`;
-
-        tamuHarianAktif.forEach((tx, i) => {
-          const ciDate = new Date(tx.checkIn); const coDate = new Date(tx.checkOut);
-          const isSudahCO = sekarang > coDate;
-          let formattedCi = (tx.tipeInap === 'transit') ? format(ciDate, 'dd/MM/yy HH:mm') : format((ciDate.getHours() < rHour ? subDays(ciDate, 1) : ciDate), 'dd/MM/yy');
-          const formattedCo = tx.tipeInap === 'transit' ? format(coDate, 'dd/MM/yy HH:mm') : format(coDate, 'dd/MM/yy');
-          const hrgDep = (tx.pembayaran?.jumlahDeposit || 0).toLocaleString('id-ID');
-          
-          const diskonLabel = formatDiskonLabel(tx.pembayaran?.diskon, tx.pembayaran?.jumlahKamar);
-          let teksBayarKamar = (tx.pembayaran?.detailMetodeKamar && tx.pembayaran.detailMetodeKamar.length > 0) 
-            ? tx.pembayaran.detailMetodeKamar.map(m => `${m.metode} Rp ${Number(m.nominal).toLocaleString('id-ID')} ${diskonLabel}`).join(' + ')
-            : `${tx.pembayaran?.metodeKamar || '-'} Rp ${(tx.pembayaran?.jumlahKamar || 0).toLocaleString('id-ID')} ${diskonLabel}`;
-
-          let teksTambahan = '';
-          if (tx.pembayaran?.tambahan && tx.pembayaran.tambahan.length > 0) tx.pembayaran.tambahan.forEach(t => { teksTambahan += ` + ${t.metode} Rp ${t.jumlah.toLocaleString('id-ID')} (${t.nama})`; });
-
-          let infoBersih = (tx.info || '-').split(' | [Deposit')[0];
-
-          teks += `${i + 1}. Nama Tamu : ${tx.nama}\nBooking By : ${tx.bookingBy}\nCheck-In : ${formattedCi}\nCheck-Out : ${formattedCo}\nRoom Type : ${roomTypeLabels[tx.tipeKamar] || tx.tipeKamar} #${tx.noKamar}\nPembayaran : ${teksBayarKamar} + ${tx.pembayaran?.metodeDeposit} Rp ${hrgDep} (Deposit)${teksTambahan}\nTamu dari : ${tx.tamuDari || '-'}\nInfo : *${isSudahCO ? `${infoBersih} - Sudah C/O, Kamar Ready` : infoBersih}*\n\n\n\n`;
-        });
-
-        teks += `Sisa Kamar : ${totalSisa} Kamar\n\n\n\nStandard Double Bed : ${sisaDouble}\nStandard Twin Bed : ${sisaTwin}\nStandard Single Bed : ${sisaSingle}\n\n\n\n-----\n\n\n\nKost :\n`;
-
-        tamuKosAktif.forEach((kos, i) => {
-          const num = (i + 1).toString().padStart(2, '0');
-          const start = format(new Date(kos.periodeStart), 'dd/MM/yyyy'); const end = format(new Date(kos.periodeEnd), 'dd/MM/yyyy');
-          const hrgDep = (kos.pembayaran?.jumlahDeposit || 0).toLocaleString('id-ID');
-          const endDateTime = new Date(kos.periodeEnd); endDateTime.setHours(rHour,0,0,0);
-          
-          const diskonLabel = formatDiskonLabel(kos.pembayaran?.diskon, kos.pembayaran?.jumlahKamar);
-          let teksBayarKamar = (kos.pembayaran?.detailMetodeKamar && kos.pembayaran.detailMetodeKamar.length > 0) 
-            ? kos.pembayaran.detailMetodeKamar.map(m => `${m.metode} Rp ${Number(m.nominal).toLocaleString('id-ID')} ${diskonLabel}`).join(' + ')
-            : `${kos.pembayaran?.metodeKamar || '-'} Rp ${(kos.pembayaran?.jumlahKamar || 0).toLocaleString('id-ID')} ${diskonLabel}`;
-
-          let teksTambahan = '';
-          if (kos.pembayaran?.tambahan && kos.pembayaran.tambahan.length > 0) kos.pembayaran.tambahan.forEach(t => { teksTambahan += ` + ${t.metode} Rp ${t.jumlah.toLocaleString('id-ID')} (${t.nama})`; });
-
-          let infoBersih = (kos.info || '-').split(' | [Deposit')[0];
-
-          teks += `${num}. Nama : ${kos.nama}\nPeriode : ${start} - ${end}\nRoom Type : ${roomTypeLabels[kos.roomType] || kos.roomType} #${kos.roomNumber}\nPembayaran : ${teksBayarKamar} + ${kos.pembayaran?.metodeDeposit} Rp ${hrgDep} (Deposit)${teksTambahan}\nInfo : *${sekarang > endDateTime ? `${infoBersih} - Sudah C/O, Kamar Ready` : infoBersih}*\n\n`;
-        });
-
-        setPreviewText(teks.trim());
-      } catch (err) { console.error(err); setPreviewText("Gagal merakit laporan."); }
-    };
-    buildPreview();
-  }, [refreshPreviewTrigger]);
-  // [END: Effects]
 
   // [START: PricingLogic]
   const resolvePrice = (targetDate, roomType, bookingChannel) => {
@@ -371,13 +353,20 @@ export default function FormCheckIn() {
   const handleSelectRoom = (kamarNo, kamarTipe) => { setNoKamar(kamarNo); setTipeKamar(kamarTipe); setIsRoomModalOpen(false); };
   const handleSelectCity = (kota) => { setTamuDari(kota); setIsCityModalOpen(false); setCitySearch(''); setCityPage(1); };
 
-  const tambahBiaya = () => setTambahanList([...tambahanList, { id: generateTimestamp(), nama: '', metode: 'Transfer', jumlah: 0 }]);
+  const tambahBiaya = () => setTambahanList([...tambahanList, { id: generateTimestamp(), nama: '', metode: 'Transfer', jumlah: 0, qty: 1, isMultiQty: false }]);
   
   const updateBiaya = (id, field, value) => {
     setTambahanList(tambahanList.map(item => item.id === id ? { ...item, [field]: value } : item));
   };
+  
   const handleSelectMasterExtra = (id, masterObj) => {
-    setTambahanList(tambahanList.map(item => item.id === id ? { ...item, nama: masterObj.nama, jumlah: masterObj.harga } : item));
+    setTambahanList(tambahanList.map(item => item.id === id ? { 
+      ...item, 
+      nama: masterObj.nama, 
+      jumlah: masterObj.harga,
+      isMultiQty: masterObj.isMultiQty || false,
+      qty: 1
+    } : item));
     setActiveExtraDropdown(null);
   };
   
@@ -396,6 +385,12 @@ export default function FormCheckIn() {
   const handleSimpan = async () => {
     if (!nama || !waktuMasuk || !noKamar) {
       await alert("Mohon lengkapi Nama Tamu, Nomor Kamar, dan Waktu Masuk terlebih dahulu.", "Validasi Gagal");
+      return;
+    }
+
+    // TAMBAHAN: Validasi panjang nomor telepon
+    if (noTelp && (noTelp.length < 8 && noTelp.length > 0 || noTelp.length > 15)) {
+      await alert("Nomor telepon harus berisi antara 8 hingga 15 angka.", "Validasi Gagal");
       return;
     }
     
@@ -419,11 +414,9 @@ export default function FormCheckIn() {
 
     setIsSaving(true);
     try {
-      const getRes = await fetch('http://localhost:5000/api/data');
-      if (!getRes.ok) throw new Error("Gagal koneksi server");
-      const dbData = await getRes.json();
+      const currentDb = JSON.parse(JSON.stringify(dbData));
 
-      const adaTamuHarianBentrok = (dbData.dailyTransactions || []).some(tx => {
+      const adaTamuHarianBentrok = (currentDb.dailyTransactions || []).some(tx => {
         if (!tx.isVoid && tx.noKamar.toString().trim() === nomorKamarBersih) {
           const start = new Date(tx.checkIn); const end = new Date(tx.checkOut);
           return waktuCI >= start && waktuCI <= end;
@@ -431,7 +424,7 @@ export default function FormCheckIn() {
         return false;
       });
       
-      const adaTamuKosBentrok = (dbData.activeKost || []).some(kos => {
+      const adaTamuKosBentrok = (currentDb.activeKost || []).some(kos => {
         if (!kos.isVoid && kos.roomNumber.toString().trim() === nomorKamarBersih) {
           const start = new Date(kos.periodeStart); start.setHours(rolloverHour, 0, 0, 0);
           const end = new Date(kos.periodeEnd); end.setHours(rolloverHour, 0, 0, 0);
@@ -452,14 +445,19 @@ export default function FormCheckIn() {
           const newGuest = {
               guestId: finalGuestId,
               nama, jenisKelamin: jenisKelamin || '-', tamuDari,
-              noTelp: '', profesi: '', nik: '', tanggalLahir: '', alamatKantor: '', alamatLengkap: '',
+              noTelp: noTelp || '', profesi: '', nik: (tipeId === 'KTP' ? nomorId : ''), tipeIdLain: tipeId, nomorIdLain: nomorId, 
+              tanggalLahir: '', alamatKantor: '', alamatLengkap: '',
               waktuDibuat: new Date().toISOString()
           };
-          if (!dbData.guests) dbData.guests = [];
-          dbData.guests.push(newGuest);
+          if (!currentDb.guests) currentDb.guests = [];
+          currentDb.guests.push(newGuest);
       }
 
       const gabunganMetode = detailMetodeKamar.map(m => m.metode).filter((v, i, a) => a.indexOf(v) === i).join(' & ');
+
+      const finalTambahan = tambahanList.filter(t => t.nama && t.jumlah > 0).map(t => ({
+        id: t.id, nama: t.nama, metode: t.metode, jumlah: t.jumlah, qty: t.qty || 1
+      }));
 
       if (tipeInap === 'harian' || tipeInap === 'transit') {
         const transaksiBaru = {
@@ -467,10 +465,10 @@ export default function FormCheckIn() {
           nama, pernahCI, bookingBy, tamuDari, noKamar: nomorKamarBersih, 
           checkIn: waktuMasuk, checkOut: waktuKeluar, tipeInap, tipeKamar, info,
           statusDeposit: 'Belum Refund', jenisKelamin: jenisKelamin || '-',
-          pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, diskon: nominalDiskon, metodeDeposit, jumlahDeposit: depositDefault, tambahan: tambahanList.filter(t => t.nama && t.jumlah > 0), rincianTarifHarian }
+          pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, diskon: nominalDiskon, metodeDeposit, jumlahDeposit: depositDefault, tambahan: finalTambahan, rincianTarifHarian }
         };
-        if (!dbData.dailyTransactions) dbData.dailyTransactions = [];
-        dbData.dailyTransactions.push(transaksiBaru);
+        if (!currentDb.dailyTransactions) currentDb.dailyTransactions = [];
+        currentDb.dailyTransactions.push(transaksiBaru);
         setPrintData(transaksiBaru); 
       }
       else if (tipeInap === 'kos') {
@@ -482,22 +480,35 @@ export default function FormCheckIn() {
           nama, roomType: tipeKamar, roomNumber: nomorKamarBersih, waktuMasuk, 
           periodeStart: format(actualStart, 'yyyy-MM-dd'), periodeEnd: format(waktuKeluar, 'yyyy-MM-dd'), 
           tamuDari, statusDeposit: 'Belum Refund', jenisKelamin: jenisKelamin || '-',
-          pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, diskon: nominalDiskon, metodeDeposit, jumlahDeposit: depositDefault, tambahan: tambahanList.filter(t => t.nama && t.jumlah > 0) } 
+          pembayaran: { metodeKamar: gabunganMetode, detailMetodeKamar, jumlahKamar: totalTagihanKamar, diskon: nominalDiskon, metodeDeposit, jumlahDeposit: depositDefault, tambahan: finalTambahan } 
         };
-        if (!dbData.activeKost) dbData.activeKost = [];
-        dbData.activeKost.push(transaksiBaru);
+        if (!currentDb.activeKost) currentDb.activeKost = [];
+        currentDb.activeKost.push(transaksiBaru);
         setPrintData(transaksiBaru); 
       }
 
-      const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
+      const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentDb) });
       const result = await postRes.json();
       
       if (result.success) {
+        refreshData(); 
+        // [START: ResetForm]
         toast("Tamu berhasil di-check-in-kan.", "success");
-        setNama(''); setGuestId(''); setJenisKelamin(''); setNoKamar(''); 
-        setTambahanList([]); setDiskon(0); setTipeDiskon('nominal');
-        setDetailMetodeKamar([{ id: generateTimestamp(), metode: 'Cash', nominal: 0 }]); 
-        setRefreshPreviewTrigger(prev => prev + 1); 
+        // Kosongkan form setelah sukses
+        setNama(''); 
+        setGuestId(''); 
+        setJenisKelamin(''); 
+        setNoKamar(''); 
+        setNoTelp(''); 
+        setNomorId('');
+        setTamuDari('');
+        setDurasiMalam(1);
+        setTambahanList([]); 
+        setDiskon(0); 
+        setTipeDiskon('nominal');
+        setInfo('');
+        setDetailMetodeKamar([{ id: generateTimestamp(), metode: 'Cash', nominal: 0 }]);
+// [END: ResetForm]
       } else { await alert("Gagal menyimpan: " + result.error, "Error Simpan"); }
     } catch (error) { 
       console.error(error); 
@@ -512,7 +523,7 @@ export default function FormCheckIn() {
 
   const formatRp = (angka) => Number(angka || 0).toLocaleString('id-ID');
 
-  if (isLoadingSettings) return <div className="text-center p-10">Memuat pengaturan...</div>;
+  if (isDbLoading) return <div className="text-center p-10 font-medium text-gray-500">Memuat data operasional dari memori sentral...</div>;
 
   // [START: Render]
   return (
@@ -526,75 +537,93 @@ export default function FormCheckIn() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="relative">
-            <div className="grid grid-cols-3 gap-2">
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nama Tamu</label>
-                <input 
-                  type="text" value={nama} 
-                  onChange={(e) => { 
-                    setNama(toTitleCase(e.target.value)); setGuestId(''); 
-                    setShowSuggestions(true);
-                    if (!e.target.value) { setPernahCI(false); updateInfoText(false, bookingBy); }
-                  }}
-                  onFocus={() => setShowSuggestions(true)}
-                  className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 transition-shadow" placeholder="Ketik nama tamu..." 
-                />
+          
+          <div className="space-y-4">
+            <div className="relative">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Nama Tamu</label>
+                  <input 
+                    type="text" value={nama} 
+                    onChange={(e) => { 
+                      setNama(toTitleCase(e.target.value)); setGuestId(''); 
+                      setShowSuggestions(true);
+                      if (!e.target.value) { setPernahCI(false); updateInfoText(false, bookingBy); }
+                    }}
+                    onFocus={() => setShowSuggestions(true)}
+                    className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500 transition-shadow" placeholder="Ketik nama tamu..." 
+                  />
+                </div>
+                <div className="col-span-1">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Kelamin</label>
+                  <select value={jenisKelamin} onChange={(e) => setJenisKelamin(e.target.value)} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500">
+                    <option value="" disabled hidden>- Pilih -</option><option value="Laki-laki">Laki-laki ♂️</option><option value="Perempuan">Perempuan ♀️</option><option value="Lain-lain">Lain-lain ⚪</option>
+                  </select>
+                </div>
               </div>
-              <div className="col-span-1">
-                <label className="block text-sm font-medium text-gray-700 mb-1">Kelamin</label>
-                <select value={jenisKelamin} onChange={(e) => setJenisKelamin(e.target.value)} className="w-full bg-white border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500">
-                  <option value="" disabled hidden>- Pilih -</option><option value="Laki-laki">Laki-laki ♂️</option><option value="Perempuan">Perempuan ♀️</option><option value="Lain-lain">Lain-lain ⚪</option>
-                </select>
+              <div className="mt-1.5 h-5">
+                {pernahCI && <span className="inline-block bg-green-100 text-green-800 text-[10px] font-extrabold px-2 py-0.5 rounded uppercase tracking-wider shadow-sm">✅ Tamu Langganan (Pernah C/I)</span>}
+              </div>
+              {showSuggestions && nama.length >= 2 && (
+                <div className="absolute z-40 w-full mt-1 bg-white border border-green-200 rounded-lg shadow-xl max-h-48 overflow-y-auto">
+                  {databaseTamu.filter(g => g.nama.toLowerCase().includes(nama.toLowerCase())).length === 0 ? (
+                    <div className="p-3 text-xs text-gray-500 italic text-center">Tamu baru belum ada di database.</div>
+                  ) : (
+                    databaseTamu.filter(g => g.nama.toLowerCase().includes(nama.toLowerCase())).map((g, idx) => (
+                      <button key={idx} type="button" className="w-full text-left px-4 py-2 text-sm border-b border-gray-50 hover:bg-green-50 focus:bg-green-100 outline-none transition-colors"
+                        onClick={() => { 
+                          setGuestId(g.guestId); setNama(g.nama); 
+                          if (g.tamuDari) setTamuDari(g.tamuDari); 
+                          if (g.jenisKelamin) setJenisKelamin(g.jenisKelamin); 
+                          if (g.noTelp) setNoTelp(g.noTelp);
+                          if (g.nik) { setTipeId('KTP'); setNomorId(g.nik); }
+                          else if (g.nomorIdLain) { setTipeId(g.tipeIdLain || 'KTP'); setNomorId(g.nomorIdLain); }
+                          setPernahCI(true); updateInfoText(true, bookingBy); setShowSuggestions(false); 
+                        }}
+                      ><div className="font-bold text-gray-800">{g.nama}</div>{g.tamuDari && <div className="text-[10px] text-gray-500 font-medium">📍 {g.tamuDari}</div>}</button>
+                    ))
+                  )}
+                </div>
+              )}
+              {showSuggestions && <div className="fixed inset-0 z-30" onClick={() => setShowSuggestions(false)}></div>}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nomor Telepon</label>
+                <input type="text" value={noTelp} onChange={(e) => setNoTelp(e.target.value.replace(/[^0-9+]/g, ''))} placeholder="0812..." className="w-full border border-gray-300 rounded-md p-2 text-sm outline-none focus:ring-1 focus:ring-green-500" />
+              </div>
+              <div className="flex flex-col">
+                 <label className="block text-sm font-medium text-gray-700 mb-1">Identitas Resmi</label>
+                 <div className="flex gap-1 h-[38px]">
+                   <select value={tipeId} onChange={(e) => setTipeId(e.target.value)} className="w-1/3 bg-gray-50 border border-gray-300 rounded-l-md p-1 text-xs font-bold outline-none focus:border-green-500">
+                     <option value="KTP">KTP</option><option value="SIM">SIM</option><option value="PASPOR">Paspor</option>
+                   </select>
+                   <input type="text" value={nomorId} onChange={(e) => setNomorId(e.target.value)} placeholder="Nomor..." className="w-2/3 border border-gray-300 rounded-r-md p-2 text-sm outline-none focus:ring-1 focus:ring-green-500" />
+                 </div>
               </div>
             </div>
-            
-            <div className="mt-1.5 h-5">
-              {pernahCI && <span className="inline-block bg-green-100 text-green-800 text-[10px] font-extrabold px-2 py-0.5 rounded uppercase tracking-wider shadow-sm">✅ Tamu Langganan (Pernah C/I)</span>}
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Nomor Kamar</label>
+              <button type="button" onClick={() => setIsRoomModalOpen(true)} className={`w-full text-left border rounded-md p-2 shadow-sm font-bold flex justify-between items-center transition-colors cursor-pointer ${noKamar ? 'bg-green-50 border-green-300 text-green-800' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'}`}>
+                <span>{noKamar ? `Kamar ${noKamar} (${tipeKamar.split('-')[0].toUpperCase()})` : '-- Buka Denah Kamar --'}</span><span className="text-lg">🛏️</span>
+              </button>
+              <p className="text-[10px] text-gray-500 mt-1">Tipe Kamar otomatis tersetel dari denah.</p>
             </div>
 
-            {showSuggestions && nama.length >= 2 && (
-              <div className="absolute z-40 w-full mt-1 bg-white border border-green-200 rounded-lg shadow-xl max-h-48 overflow-y-auto">
-                {databaseTamu.filter(g => g.nama.toLowerCase().includes(nama.toLowerCase())).length === 0 ? (
-                  <div className="p-3 text-xs text-gray-500 italic text-center">Tamu baru belum ada di database.</div>
-                ) : (
-                  databaseTamu.filter(g => g.nama.toLowerCase().includes(nama.toLowerCase())).map((g, idx) => (
-                    <button key={idx} type="button" className="w-full text-left px-4 py-2 text-sm border-b border-gray-50 hover:bg-green-50 focus:bg-green-100 outline-none transition-colors"
-                      onClick={() => { setGuestId(g.guestId); setNama(g.nama); if (g.tamuDari) setTamuDari(g.tamuDari); if (g.jenisKelamin) setJenisKelamin(g.jenisKelamin); setPernahCI(true); updateInfoText(true, bookingBy); setShowSuggestions(false); }}
-                    ><div className="font-bold text-gray-800">{g.nama}</div>{g.tamuDari && <div className="text-[10px] text-gray-500 font-medium">📍 {g.tamuDari}</div>}</button>
-                  ))
-                )}
-              </div>
-            )}
-            {showSuggestions && <div className="fixed inset-0 z-30" onClick={() => setShowSuggestions(false)}></div>}
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Nomor Kamar</label>
-            <button type="button" onClick={() => setIsRoomModalOpen(true)} className={`w-full text-left border rounded-md p-2 shadow-sm font-bold flex justify-between items-center transition-colors ${noKamar ? 'bg-green-50 border-green-300 text-green-800' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'}`}>
-              <span>{noKamar ? `Kamar ${noKamar} (${tipeKamar.split('-')[0].toUpperCase()})` : '-- Buka Denah Kamar --'}</span><span className="text-lg">🛏️</span>
-            </button>
-            <p className="text-[10px] text-gray-500 mt-1">Tipe Kamar otomatis tersetel dari denah.</p>
-          </div>
-
-          <div>
-            <div className="flex justify-between items-end mb-1"><label className="block text-sm font-medium text-gray-700">Waktu Masuk (Check-In)</label><button type="button" onClick={setKeWaktuSekarang} className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded font-medium hover:bg-gray-300 transition-colors">⏱️ Set Waktu Saat Ini</button></div>
-            <CustomDateTimePicker 
-              value={waktuMasuk} 
-              onChange={(val) => handleWaktuMasukChange(val)} 
-              includeTime={true} 
-            />
+            <div>
+              <div className="flex justify-between items-end mb-1"><label className="block text-sm font-medium text-gray-700">Waktu Masuk (Check-In)</label><button type="button" onClick={setKeWaktuSekarang} className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded font-medium hover:bg-gray-300 transition-colors cursor-pointer">⏱️ Set Saat Ini</button></div>
+              <CustomDateTimePicker value={waktuMasuk} onChange={(val) => handleWaktuMasukChange(val)} includeTime={true} />
+            </div>
           </div>
 
           <div className="flex gap-3 items-start">
             <div className="flex-1">
               <label className="block text-sm font-medium text-gray-700 mb-1">Waktu Keluar</label>
-              <CustomDateTimePicker 
-                value={waktuKeluar} 
-                onChange={(val) => setWaktuKeluar(val)} 
-                includeTime={tipeInap !== 'kos'} 
-                readOnly={tipeInap === 'kos'}
-              />
+              <CustomDateTimePicker value={waktuKeluar} onChange={(val) => setWaktuKeluar(val)} includeTime={tipeInap !== 'kos'} readOnly={tipeInap === 'kos'} />
             </div>
             {tipeInap === 'harian' && (
               <div className="w-24 shrink-0">
@@ -607,7 +636,7 @@ export default function FormCheckIn() {
           {tipeInap !== 'kos' && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Sumber Booking</label>
-              <select value={bookingBy} onChange={handleBookingByChange} className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500">
+              <select value={bookingBy} onChange={handleBookingByChange} className="w-full border border-gray-300 rounded-md p-2.5 outline-none focus:ring-2 focus:ring-green-500">
                 <option value="Walk-in">Walk-in / Datang Langsung</option><option value="WA">WhatsApp</option>
                 {otaList.map(ota => (<option key={ota} value={ota}>OTA - {ota}</option>))}
               </select>
@@ -616,13 +645,13 @@ export default function FormCheckIn() {
           
           <div className={tipeInap === 'kos' ? "md:col-span-2" : ""}>
             <label className="block text-sm font-medium text-gray-700 mb-1">Kota Asal (Tamu Dari)</label>
-            <input type="text" value={tamuDari} readOnly onClick={() => setIsCityModalOpen(true)} className="w-full border border-gray-300 rounded-md p-2 bg-gray-50 cursor-pointer hover:bg-gray-100 outline-none focus:ring-2 focus:ring-green-500" placeholder="Pilih kota..." />
+            <input type="text" value={tamuDari} readOnly onClick={() => setIsCityModalOpen(true)} className="w-full border border-gray-300 rounded-md p-2.5 bg-gray-50 cursor-pointer hover:bg-gray-100 outline-none focus:ring-2 focus:ring-green-500" placeholder="Pilih kota..." />
           </div>
 
           {tipeInap !== 'kos' && (
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">Informasi Referensi Hotel</label>
-              <input type="text" value={info} onChange={(e) => setInfo(e.target.value)} className="w-full border border-gray-300 rounded-md p-2 outline-none focus:ring-2 focus:ring-green-500" />
+              <input type="text" value={info} onChange={(e) => setInfo(e.target.value)} className="w-full border border-gray-300 rounded-md p-2.5 outline-none focus:ring-2 focus:ring-green-500" />
             </div>
           )}
         </div>
@@ -666,14 +695,14 @@ export default function FormCheckIn() {
           <div className="flex justify-between items-center mb-4"><h3 className="font-bold text-orange-900 flex items-center gap-2"><span>🛒</span> Tagihan Ekstra (Opsional)</h3><button onClick={tambahBiaya} className="text-xs bg-orange-600 text-white px-3 py-1.5 rounded-full font-bold hover:bg-orange-700 shadow-sm">+ Tambah Ekstra</button></div>
           {tambahanList.length === 0 ? (<p className="text-sm text-orange-700/60 italic bg-white p-4 rounded-lg border border-dashed border-orange-200 text-center">Belum ada biaya extra bed, parkir, dll.</p>) : (<div className="space-y-3">{tambahanList.map((item) => (
             <div key={item.id} className="flex gap-2 items-end bg-white p-3 rounded-lg border border-orange-100 shadow-sm relative">
-              <div className="w-1/3">
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nama Item</label>
+              <div className="w-full sm:w-1/3">
+                <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Nama Item</label>
                 <input 
                   type="text" 
                   value={item.nama} 
                   onChange={(e) => updateBiaya(item.id, 'nama', toTitleCase(e.target.value))} 
                   onFocus={() => setActiveExtraDropdown(item.id)}
-                  className="w-full border rounded p-2 text-sm outline-none focus:ring-1 focus:ring-orange-500 bg-orange-50/30" 
+                  className="w-full border border-gray-300 rounded p-1.5 text-xs outline-none focus:ring-1 focus:ring-orange-500 bg-orange-50/30 font-bold text-gray-700" 
                   placeholder="Ketik / Pilih..." 
                 />
                 
@@ -695,19 +724,37 @@ export default function FormCheckIn() {
                 )}
                 {activeExtraDropdown === item.id && <div className="fixed inset-0 z-30" onClick={() => setActiveExtraDropdown(null)}></div>}
               </div>
-              <div className="w-1/4">
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Via</label>
-                <select value={item.metode} onChange={(e) => updateBiaya(item.id, 'metode', e.target.value)} className="w-full border rounded p-2 text-sm outline-none focus:ring-1 focus:ring-orange-500">
+
+              <div className={`transition-all duration-300 ${item.isMultiQty ? 'w-24' : 'w-0 overflow-hidden'}`}>
+                 <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1 text-center whitespace-nowrap">Kuantitas</label>
+                 <div className="flex border border-gray-300 rounded overflow-hidden">
+                   <button onClick={() => updateBiaya(item.id, 'qty', Math.max(1, (item.qty || 1) - 1))} className="w-1/3 bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold outline-none cursor-pointer">-</button>
+                   <input type="number" min="1" value={item.qty || 1} onChange={(e) => updateBiaya(item.id, 'qty', Math.max(1, parseInt(e.target.value) || 1))} className="w-1/3 text-center text-xs font-bold text-orange-800 outline-none no-spinners" />
+                   <button onClick={() => updateBiaya(item.id, 'qty', (item.qty || 1) + 1)} className="w-1/3 bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold outline-none cursor-pointer">+</button>
+                 </div>
+              </div>
+
+              <div className="flex-1">
+                <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Harga Satuan (Rp)</label>
+                <input type="number" value={item.jumlah === 0 ? '' : item.jumlah} onChange={(e) => updateBiaya(item.id, 'jumlah', Number(e.target.value))} className="w-full border border-gray-300 rounded p-1.5 text-xs outline-none focus:ring-1 focus:ring-orange-500 font-bold text-orange-900" />
+              </div>
+              <div className="w-24">
+                <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Via</label>
+                <select value={item.metode} onChange={(e) => updateBiaya(item.id, 'metode', e.target.value)} className="w-full border border-gray-300 rounded p-1.5 text-[10px] font-bold outline-none focus:ring-1 focus:ring-orange-500">
                   <option value="Cash">Cash</option><option value="Transfer">Transfer</option><option value="QRIS">QRIS</option>
                 </select>
               </div>
-              <div className="w-1/3">
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nominal (Rp)</label>
-                <input type="number" value={item.jumlah === 0 ? '' : item.jumlah} onChange={(e) => updateBiaya(item.id, 'jumlah', Number(e.target.value))} className="w-full border rounded p-2 text-sm outline-none focus:ring-1 focus:ring-orange-500 font-bold text-orange-900" />
+              <div className="w-auto flex flex-col justify-end items-center px-1 pb-1">
+                <button onClick={() => hapusBiaya(item.id)} className="text-red-400 hover:text-red-600 hover:bg-red-50 w-6 h-6 rounded flex items-center justify-center font-bold text-xl leading-none transition-colors">&times;</button>
               </div>
-              <button onClick={() => hapusBiaya(item.id)} className="text-red-500 hover:text-red-700 font-bold p-1 text-2xl leading-none">&times;</button>
             </div>
-          ))}</div>)}
+          ))}
+          {tambahanList.length > 0 && (
+             <div className="text-right text-xs font-bold text-orange-800 mt-2 pr-2">
+                Total Ekstra: Rp {tambahanList.reduce((sum, t) => sum + ((t.jumlah || 0) * (t.qty || 1)), 0).toLocaleString('id-ID')}
+             </div>
+          )}
+          </div>)}
         </div>
 
         <div className="bg-green-50/50 p-5 rounded-xl border border-green-200">
@@ -734,7 +781,7 @@ export default function FormCheckIn() {
                   <select value={item.metode} onChange={(e) => setDetailMetodeKamar(detailMetodeKamar.map(m => m.id === item.id ? { ...m, metode: e.target.value } : m))} className="w-1/2 border border-gray-200 rounded p-1.5 text-sm outline-none focus:ring-1 focus:ring-green-500 bg-white font-bold text-gray-700">
                     <option value="Cash">Cash</option><option value="Transfer">Transfer</option><option value="QRIS">QRIS</option><option value="Debit/Kredit">Debit/Kredit</option>{tipeInap !== 'kos' && otaList.includes(bookingBy) && <option value={bookingBy}>{bookingBy}</option>}
                   </select>
-                  <input type="number" value={item.nominal === 0 ? '' : item.nominal} onChange={(e) => setDetailMetodeKamar(detailMetodeKamar.map(m => m.id === item.id ? { ...m, nominal: Number(e.target.value) } : m))} placeholder="Nominal" className="w-1/2 border border-gray-200 rounded p-1.5 text-sm outline-none focus:ring-1 focus:ring-green-500 bg-white font-bold" />
+                  <input type="number" value={item.nominal === 0 ? '' : item.nominal} onChange={(e) => setDetailMetodeKamar(detailMetodeKamar.map(m => m.id === item.id ? { ...m, nominal: Number(e.target.value) } : m))} placeholder="Nominal" className="w-1/2 border border-gray-200 rounded p-1.5 text-sm outline-none focus:ring-1 focus:ring-green-500 bg-white font-bold no-spinners" />
                   {detailMetodeKamar.length > 1 && (<button onClick={() => setDetailMetodeKamar(detailMetodeKamar.filter(m => m.id !== item.id))} className="text-red-500 font-bold hover:text-red-700 bg-red-50 w-8 h-8 flex items-center justify-center rounded text-xl">&times;</button>)}
                 </div>
               ))}
@@ -746,14 +793,14 @@ export default function FormCheckIn() {
           </div>
         </div>
 
-        <button onClick={handleSimpan} disabled={isSaving} className={`w-full py-4 rounded-xl text-white font-extrabold text-lg shadow-lg transition-all transform ${isSaving ? 'bg-gray-400 scale-100' : 'bg-[#1a4b1a] hover:bg-green-900 hover:scale-[1.01] active:scale-100'}`}>
+        <button onClick={handleSimpan} disabled={isSaving} className={`w-full py-4 rounded-xl text-white font-extrabold text-lg shadow-lg transition-all transform ${isSaving ? 'bg-gray-400 scale-100' : 'bg-[#1a4b1a] hover:bg-green-900 hover:scale-[1.01] active:scale-100 cursor-pointer'}`}>
           {isSaving ? 'MEMPROSES...' : '📥 PROSES CHECK-IN TAMU'}
         </button>
 
         <div className="mt-8 pt-8 border-t border-gray-200">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 mb-4">
             <div><h3 className="font-bold text-gray-800 text-lg">📱 Laporan Shift WhatsApp</h3><p className="text-xs text-gray-500">Salin laporan gabungan Harian dan Kos ke grup operasional.</p></div>
-            <div className="flex gap-2 w-full md:w-auto"><button onClick={() => setRefreshPreviewTrigger(p => p + 1)} className="flex-1 bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-gray-50">🔄 Muat Ulang</button><button onClick={copyToClipboard} className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm">📋 Salin Teks</button></div>
+            <div className="flex gap-2 w-full md:w-auto"><button onClick={refreshData} className="flex-1 bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-gray-50">🔄 Muat Ulang</button><button onClick={copyToClipboard} className="flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm">📋 Salin Teks</button></div>
           </div>
           <textarea readOnly value={previewText} className="w-full h-[600px] border border-gray-200 rounded-xl p-5 bg-gray-50/50 text-sm font-mono text-gray-700 resize-y outline-none focus:ring-2 focus:ring-[#1a4b1a] shadow-inner" />
         </div>
@@ -821,8 +868,8 @@ export default function FormCheckIn() {
               <p className="text-xs text-gray-400">Pilih margin "Narrow". Ukuran kertas dari driver EPSON akan mendominasi.</p>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setPrintData(null)} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold transition-colors">Tutup Preview</button>
-              <button onClick={() => window.print()} className="bg-green-600 hover:bg-green-500 px-5 py-2 rounded font-bold flex items-center gap-2 shadow-md transition-colors"><span>🖨️</span> Cetak Sekarang</button>
+              <button onClick={() => setPrintData(null)} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold transition-colors cursor-pointer">Tutup Preview</button>
+              <button onClick={() => window.print()} className="bg-green-600 hover:bg-green-500 px-5 py-2 rounded font-bold flex items-center gap-2 shadow-md transition-colors cursor-pointer"><span>🖨️</span> Cetak Sekarang</button>
             </div>
           </div>
           
@@ -830,12 +877,17 @@ export default function FormCheckIn() {
             <div className="bg-white w-full max-w-[195mm] min-h-[138mm] mx-auto p-6 shadow-2xl mb-10 print:!max-w-[195mm] print:!w-[195mm] print:!shadow-none print:!m-0 print:!p-0 print:!min-h-0 print:!h-auto flex flex-col font-sans text-sm print:text-[10px] relative receipt-box">
               <div className="border-b border-black pb-1 mb-3 print:mb-2 flex justify-between items-end"><div className="flex-shrink-0"><img src="/logo.png" alt="Greenhaus Inn" className="h-28 print:h-14 w-auto object-contain mix-blend-multiply" /></div><div className="text-right"><p className="text-sm print:text-[9px] font-medium text-gray-800 print:text-black leading-tight">Jl. Dinoyo No.86, Keputran, Surabaya</p><p className="text-sm print:text-[11px] font-extrabold uppercase mt-0.5 tracking-wide text-gray-900 print:text-black leading-tight">Tanda Terima Pembayaran</p></div></div>
               <div className="flex justify-between mb-6 print:mb-2">
-                <div><table className="text-sm print:text-[10px]"><tbody><tr><td className="pr-4 font-bold text-gray-600 print:text-black">No. Transaksi</td><td>: {printData.id}</td></tr><tr><td className="pr-4 font-bold text-gray-600 print:text-black">Tipe Inap</td><td>: {toTitleCase(printData.tipeInap || 'kos')}</td></tr><tr><td className="pr-4 font-bold text-gray-600 print:text-black">Waktu Masuk</td><td>: {(() => { const dateVal = printData.type === 'harian' ? printData.checkIn : printData.periodeStart; const d = new Date(dateVal); return isNaN(d) ? '-' : format(d, 'dd/MM/yyyy HH:mm'); })()}</td></tr><tr><td className="pr-4 font-bold text-gray-600 print:text-black">Waktu Keluar</td><td>: {(() => { const dateVal = printData.type === 'harian' ? printData.checkOut : (printData.periodeEnd ? printData.periodeEnd + 'T12:00:00' : null); const d = new Date(dateVal); return isNaN(d) ? '-' : format(d, 'dd/MM/yyyy HH:mm'); })()}</td></tr></tbody></table></div>
+                <div><table className="text-sm print:text-[10px]"><tbody>
+                  <tr><td className="pr-4 font-bold text-gray-600 print:text-black">No. Transaksi</td><td>: {printData.id}</td></tr>
+                  <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Tipe Inap</td><td>: {toTitleCase(printData.tipeInap || 'kos')}</td></tr>
+                  <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Waktu Masuk</td><td>: {(() => { const isHarian = printData.tipeInap === 'harian' || printData.tipeInap === 'transit' || printData.type === 'harian'; const dateVal = isHarian ? printData.checkIn : printData.periodeStart; const d = new Date(dateVal); return isNaN(d) ? '-' : format(d, 'dd/MM/yyyy HH:mm'); })()}</td></tr>
+                  <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Waktu Keluar</td><td>: {(() => { const isHarian = printData.tipeInap === 'harian' || printData.tipeInap === 'transit' || printData.type === 'harian'; const dateVal = isHarian ? printData.checkOut : (printData.periodeEnd ? printData.periodeEnd + 'T12:00:00' : null); const d = new Date(dateVal); return isNaN(d) ? '-' : format(d, 'dd/MM/yyyy HH:mm'); })()}</td></tr>
+                </tbody></table></div>
                 <div>
                   <table className="text-sm print:text-[10px]">
                     <tbody>
                       <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Nama Tamu</td><td className="font-bold">: {toTitleCase(printData.nama)}</td></tr>
-                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Kamar</td><td className="font-bold">: #{printData.type === 'harian' ? printData.noKamar : printData.roomNumber}</td></tr>
+                      <tr><td className="pr-4 font-bold text-gray-600 print:text-black">Kamar</td><td className="font-bold">: #{printData.noKamar || printData.roomNumber}</td></tr>
                       {printData.info && printData.info.includes('[Pindah') && (
                         <tr><td className="pr-4 font-bold text-gray-600 print:text-black align-top">Catatan Kamar</td><td className="font-bold text-[9px] italic text-orange-600 print:text-black">: {printData.info.split(' | ').find(i => i.includes('[Pindah'))}</td></tr>
                       )}
@@ -849,8 +901,16 @@ export default function FormCheckIn() {
                 <table className="w-full text-sm print:text-[10px] mb-4 print:mb-1 border print:border-black">
                   <thead className="bg-[#1a4b1a] text-white print:bg-white print:text-black print:border-b-2 print:border-black"><tr><th className="p-2 print:px-1 print:py-0.5 text-left print:border-black print:border-b">Deskripsi Transaksi</th><th className="p-2 print:px-1 print:py-0.5 text-right w-32 print:border-black print:border-b">Nominal (Rp)</th></tr></thead>
                   <tbody>
-                    {printData.pembayaran?.rincianTarifHarian && printData.pembayaran.rincianTarifHarian.length > 0 ? ( printData.pembayaran.rincianTarifHarian.map((malam, idx) => ( <tr key={`mlm-${idx}`} className="border-b border-gray-100 print:border-black"><td className="p-2 print:px-1 print:py-0.5 print:border-black">Sewa Kamar #{printData.noKamar} (Malam {idx + 1}) - {!isNaN(new Date(malam.tanggal)) ? format(new Date(malam.tanggal), 'dd/MM/yy') : '-'} <span className="text-[9px] uppercase">({malam.jenis})</span></td><td className="p-2 print:px-1 print:py-0.5 text-right print:border-black">{formatRp(malam.harga)}</td></tr>)) ) : ( <tr className="border-b border-gray-100 print:border-black"><td className="p-2 print:px-1 print:py-0.5 print:border-black">Sewa Kamar #{printData.type === 'harian' ? printData.noKamar : printData.roomNumber}</td><td className="p-2 print:px-1 print:py-0.5 text-right print:border-black">{formatRp(printData.pembayaran?.jumlahKamar)}</td></tr> )}
-                    {printData.pembayaran?.tambahan && printData.pembayaran.tambahan.map((t, idx) => ( <tr key={`tambahan-${idx}`} className="border-b border-gray-100 print:border-black"><td className="p-2 print:px-1 print:py-0.5 print:border-black">Tambahan: {t.nama} <span className="text-[10px] print:text-[8px] uppercase font-bold text-gray-600 print:text-gray-800">({t.metode || '-'})</span></td><td className="p-2 print:px-1 print:py-0.5 text-right print:border-black">{formatRp(t.jumlah)}</td></tr> ))}
+                    {printData.pembayaran?.rincianTarifHarian && printData.pembayaran.rincianTarifHarian.length > 0 ? ( printData.pembayaran.rincianTarifHarian.map((malam, idx) => ( <tr key={`mlm-${idx}`} className="border-b border-gray-100 print:border-black"><td className="p-2 print:px-1 print:py-0.5 print:border-black">Sewa Kamar #{printData.noKamar || printData.roomNumber} (Malam {idx + 1}) - {!isNaN(new Date(malam.tanggal)) ? format(new Date(malam.tanggal), 'dd/MM/yy') : '-'} <span className="text-[9px] uppercase">({malam.jenis})</span></td><td className="p-2 print:px-1 print:py-0.5 text-right print:border-black">{formatRp(malam.harga)}</td></tr>)) ) : ( <tr className="border-b border-gray-100 print:border-black"><td className="p-2 print:px-1 print:py-0.5 print:border-black">Sewa Kamar #{printData.noKamar || printData.roomNumber}</td><td className="p-2 print:px-1 print:py-0.5 text-right print:border-black">{formatRp(printData.pembayaran?.jumlahKamar)}</td></tr> )}
+                    {printData.pembayaran?.tambahan && printData.pembayaran.tambahan.map((t, idx) => {
+                      const labelQty = t.qty > 1 ? `${t.qty}x ` : '';
+                      return (
+                        <tr key={`tambahan-${idx}`} className="border-b border-gray-100 print:border-black">
+                          <td className="p-2 print:px-1 print:py-0.5 print:border-black">Tambahan: {labelQty}{t.nama} <span className="text-[10px] print:text-[8px] uppercase font-bold text-gray-600 print:text-gray-800">({t.metode || '-'})</span></td>
+                          <td className="p-2 print:px-1 print:py-0.5 text-right print:border-black">{formatRp((t.jumlah || 0) * (t.qty || 1))}</td>
+                        </tr>
+                      );
+                    })}
                     
                     {printData.pembayaran?.diskon > 0 && (
                       <tr className="bg-red-50 text-red-700 font-bold print:bg-white print:text-black">
@@ -859,7 +919,12 @@ export default function FormCheckIn() {
                       </tr>
                     )}
                     
-                    <tr className="bg-gray-50 font-bold print:bg-white print:border-t-2 print:border-black"><td className="p-2 print:px-1 print:py-0.5 text-right text-[#1a4b1a] print:text-black print:border-black">TOTAL TAGIHAN NETTO:</td><td className="p-2 print:px-1 print:py-0.5 text-right text-[#1a4b1a] print:text-black print:border-black">{formatRp((printData.pembayaran?.jumlahKamar || 0) + (printData.pembayaran?.tambahan || []).reduce((sum, item) => sum + item.jumlah, 0) - (printData.pembayaran?.diskon || 0))}</td></tr>
+                    <tr className="bg-gray-50 font-bold print:bg-white print:border-t-2 print:border-black">
+                      <td className="p-2 print:px-1 print:py-0.5 text-right text-[#1a4b1a] print:text-black print:border-black">TOTAL TAGIHAN NETTO:</td>
+                      <td className="p-2 print:px-1 print:py-0.5 text-right text-[#1a4b1a] print:text-black print:border-black">
+                        {formatRp((printData.pembayaran?.jumlahKamar || 0) + (printData.pembayaran?.tambahan || []).reduce((sum, item) => sum + ((item.jumlah || 0) * (item.qty || 1)), 0) - (printData.pembayaran?.diskon || 0))}
+                      </td>
+                    </tr>
                     {(() => { 
                       const summary = {}; 
                       if (printData.pembayaran?.detailMetodeKamar?.length > 0) { 
@@ -868,7 +933,7 @@ export default function FormCheckIn() {
                         const met = printData.pembayaran?.metodeKamar || '-'; summary[met] = (summary[met] || 0) + (Number(printData.pembayaran?.jumlahKamar) || 0) - (printData.pembayaran?.diskon || 0); 
                       } 
                       if (printData.pembayaran?.tambahan && printData.pembayaran.tambahan.length > 0) { 
-                        printData.pembayaran.tambahan.forEach(t => { const met = t.metode || 'Cash'; summary[met] = (summary[met] || 0) + (Number(t.jumlah) || 0); }); 
+                        printData.pembayaran.tambahan.forEach(t => { const met = t.metode || 'Cash'; summary[met] = (summary[met] || 0) + ((Number(t.jumlah) || 0) * (t.qty || 1)); }); 
                       } 
                       return Object.entries(summary).map(([metode, nominal], idx) => ( <tr key={`bayar-${idx}`} className="print:bg-white border-t border-gray-100 border-dashed print:border-black text-gray-700"><td className="p-2 print:px-1 print:py-0.5 text-right print:text-black print:border-black text-xs print:text-[9px]">Dibayar via <span className="font-bold uppercase">{metode}</span>:</td><td className="p-2 print:px-1 print:py-0.5 text-right print:text-black print:border-black font-bold text-xs print:text-[9px]">{formatRp(nominal)}</td></tr> )); 
                     })()}
@@ -899,27 +964,51 @@ export default function FormCheckIn() {
           </div>
           
           <style>{`
+            .no-spinners {
+              -moz-appearance: textfield;
+            }
+            .no-spinners::-webkit-outer-spin-button,
+            .no-spinners::-webkit-inner-spin-button {
+              -webkit-appearance: none;
+              margin: 0;
+            }
+            
             @media print { 
               @page { size: portrait; margin: 2mm 5mm; } 
+              html, body, #root, .print-wrapper, .print-wrapper * { 
+                background: #ffffff !important; 
+                background-color: #ffffff !important; 
+                color: #000000 !important;
+                box-shadow: none !important;
+                text-shadow: none !important;
+                border-color: #000000 !important;
+              }
               html, body, #root { 
                 height: auto !important; 
                 min-height: auto !important;
                 width: 100% !important; 
                 overflow: visible !important; 
                 position: static !important;
-                background: transparent !important; 
                 margin: 0 !important; 
                 padding: 0 !important; 
                 display: block !important; 
-              } 
-              /* Mengosongkan background layar gelap sepenuhnya saat print */
-              .print-wrapper { background: transparent !important; border: none !important; box-shadow: none !important; }
-              
-              /* Mengunci paksaan render warna background/logo HANYA di area kuitansi */
+              }
+              .print-wrapper {
+                position: static !important;
+                display: block !important;
+                width: 100% !important;
+                height: auto !important;
+                overflow: visible !important;
+              }
               .receipt-box { 
-                background: white !important; 
-                -webkit-print-color-adjust: exact !important; 
-                print-color-adjust: exact !important; 
+                margin: 0 !important;
+                padding: 0 !important;
+                width: 100% !important;
+                max-w: 100% !important;
+              }
+              .print-wrapper .text-red-600, .print-wrapper .border-red-600 {
+                color: #000000 !important;
+                border-color: #000000 !important;
               }
             }
           `}</style>

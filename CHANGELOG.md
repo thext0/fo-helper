@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2] - 2026-10-01
+
+Penyelesaian alur operasional Front Office V1 dengan modul Housekeeping, In-House Folio, dan peningkatan performa penyimpanan.
+
+### Perubahan utama
+
+- Menambahkan dashboard Housekeeping untuk memantau status kamar, menjalankan transisi status sesuai SOP, mencatat PIC pembersihan, dan menyimpan catatan kamar.
+- Menambahkan halaman In-House Folio untuk mengelola tamu aktif, termasuk check-out, pindah kamar, perpanjangan, dan koreksi pembayaran.
+- Memisahkan transaksi aktif dari riwayat pasif serta memperjelas ID transaksi dan status check-out agar kunjungan lama tidak keliru ditandai In-House.
+- Menambahkan DataProvider global agar komponen berbagi data aplikasi dan mengurangi pengambilan database berulang.
+- Meningkatkan backend dengan cache memory, antrean penulisan asinkron dan atomik, serta backup debounce dengan rotasi maksimal tiga file.
+- Menyempurnakan pengamanan PIN Pengaturan, data kontak pelanggan, kuantitas tagihan ekstra, dan validasi keseimbangan pembayaran.
+- Memperbaiki reset seluruh state form check-in setelah penyimpanan berhasil.
+
 ## [0.1.1] - 2026-09-15
 
 Peningkatan UI/UX dan perapihan arsitektur halaman operasional FO Helper.

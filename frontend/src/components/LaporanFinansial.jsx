@@ -1,9 +1,10 @@
 // [START: LaporanFinansialModule]
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { format, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns';
 import * as XLSX from 'xlsx';
 import { useDialog } from './DialogProvider';
 import CustomDateTimePicker from './CustomDateTimePicker';
+import { useAppData } from '../context/DataProvider'; // <-- IMPORT CONTEXT GLOBAL
 
 const toTitleCase = (str) => {
   if (!str) return '';
@@ -12,10 +13,7 @@ const toTitleCase = (str) => {
 
 export default function LaporanFinansial() {
   const { alert, toast } = useDialog();
-
-  const [loading, setLoading] = useState(true);
-  const [finData, setFinData] = useState([]);
-  const [rolloverHour, setRolloverHour] = useState(12);
+  const { data: dbData, loading: isDbLoading } = useAppData(); // <-- GUNAKAN MEMORI
 
   const [reportPeriod, setReportPeriod] = useState('harian'); 
   const [customDate, setCustomDate] = useState({ 
@@ -23,42 +21,30 @@ export default function LaporanFinansial() {
     end: format(new Date(), 'yyyy-MM-dd') 
   });
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const res = await fetch('http://localhost:5000/api/data');
-        if (!res.ok) throw new Error("Gagal mengambil data");
-        const data = await res.json();
-        
-        const s = data.settings || {};
-        const rHour = parseInt((s.rolloverTime || '12:00').split(':')[0], 10);
-        setRolloverHour(rHour);
+  // [START: Memory Derived States]
+  const { finData, rolloverHour } = useMemo(() => {
+    if (!dbData) return { finData: [], rolloverHour: 12 };
 
-        const guests = data.guests || [];
-        const attachGuestData = (tx) => {
-          const g = guests.find(g => g.guestId === tx.guestId) || guests.find(g => (g.nama || '').toLowerCase() === (tx.nama || '').toLowerCase()) || {};
-          let jk = tx.jenisKelamin;
-          if (!jk || jk === '-' || jk === '') jk = g.jenisKelamin;
-          if (!jk || jk === '-' || jk === '') jk = 'Tidak Diisi';
-          return { ...tx, jenisKelamin: jk };
-        };
+    const s = dbData.settings || {};
+    const rHour = parseInt((s.rolloverTime || '12:00').split(':')[0], 10);
+    const guests = dbData.guests || [];
 
-        const allTx = [
-          ...(data.dailyTransactions || []).map(tx => attachGuestData({ ...tx, type: 'harian' })), 
-          ...(data.activeKost || []).map(k => attachGuestData({ ...k, type: 'kos' }))
-        ];
-        setFinData(allTx);
-      } catch (error) {
-        console.error(error);
-        alert("Gagal memuat data dari server.", "Error Jaringan");
-      } finally {
-        setLoading(false);
-      }
+    const attachGuestData = (tx) => {
+        const g = guests.find(g => g.guestId === tx.guestId) || guests.find(g => (g.nama || '').toLowerCase() === (tx.nama || '').toLowerCase()) || {};
+        let jk = tx.jenisKelamin;
+        if (!jk || jk === '-' || jk === '') jk = g.jenisKelamin;
+        if (!jk || jk === '-' || jk === '') jk = 'Tidak Diisi';
+        return { ...tx, jenisKelamin: jk };
     };
-    fetchData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
+    const allTx = [
+        ...(dbData.dailyTransactions || []).map(tx => attachGuestData({ ...tx, type: 'harian' })), 
+        ...(dbData.activeKost || []).map(k => attachGuestData({ ...k, type: 'kos' }))
+    ];
+
+    return { finData: allTx, rolloverHour: rHour };
+  }, [dbData]);
+  // [END: Memory Derived States]
 
   const { filteredFinData, finStats } = useMemo(() => {
     if (finData.length === 0) {
@@ -85,7 +71,16 @@ export default function LaporanFinansial() {
     const filtered = finData.filter(tx => {
       if (tx.isVoid) return false;
       const txDate = new Date(tx.waktuInput);
-      return txDate >= startDate && txDate <= endDate;
+      
+      // BUG FIX EXTEND: 
+      // Selain mengecek tanggal check-in (waktuInput), kita juga mengecek apakah ada
+      // riwayat penambahan durasi (rincianTarifHarian) yang terjadi di dalam rentang filter ini.
+      const hasRecentExtend = (tx.pembayaran?.rincianTarifHarian || []).some(rt => {
+        const rtDate = new Date(rt.tanggal);
+        return rtDate >= startDate && rtDate <= endDate;
+      });
+
+      return (txDate >= startDate && txDate <= endDate) || hasRecentExtend;
     });
 
     let sumNetto = 0, sumKamar = 0, sumEkstra = 0, sumDiskon = 0;
@@ -170,7 +165,7 @@ export default function LaporanFinansial() {
     toast("Laporan Excel berhasil diunduh!", "success");
   };
 
-  if (loading) return <div className="text-center p-10 text-gray-500 italic">Memuat data analitik...</div>;
+  if (isDbLoading) return <div className="text-center p-10 font-medium text-gray-500">Memuat data analitik dari memori sentral...</div>;
 
   return (
     <div className="space-y-6 animate-fade-in pb-10">

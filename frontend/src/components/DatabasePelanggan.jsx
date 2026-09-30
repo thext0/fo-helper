@@ -1,131 +1,95 @@
 // [START: DatabasePelangganModule]
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { DAFTAR_KOTA_INDONESIA } from '../data/kotaIndonesia';
 import { useDialog } from './DialogProvider';
 import CustomDateTimePicker from './CustomDateTimePicker';
+import { useAppData } from '../context/DataProvider'; // <-- IMPORT CONTEXT
 
 const toTitleCase = (str) => str.toLowerCase().replace(/\b\w/g, s => s.toUpperCase());
 
 export default function DatabasePelanggan() {
   const { alert, toast } = useDialog();
+  const { data: dbData, loading: isDbLoading, refreshData } = useAppData(); // <-- GUNAKAN MEMORI GLOBAL
 
-  const [loading, setLoading] = useState(true);
-  const [semuaPelanggan, setSemuaPelanggan] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [sortConfig, setSortConfig] = useState({ key: 'waktuDibuat', direction: 'desc' });
 
   const [editingBerkas, setEditingBerkas] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const [editTipeId, setEditTipeId] = useState('KTP');
+  const [editNomorId, setEditNomorId] = useState('');
+  
   const [isSaving, setIsSaving] = useState(false);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const [isCityModalOpen, setIsCityModalOpen] = useState(false);
   const [citySearch, setCitySearch] = useState('');
   const [cityPage, setCityPage] = useState(1);
 
-  useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      try {
-        const res = await fetch('http://localhost:5000/api/data');
-        if (!res.ok) throw new Error("Gagal memuat data");
-        let data = await res.json();
-        
-        let guests = data.guests || [];
-        let needSave = false;
+  // [START: Memory Derived States]
+  // Menggunakan useMemo agar perhitungan riwayat super cepat dan tidak memicu render ulang (Tahap 5 & 7 Performa)
+  const semuaPelanggan = useMemo(() => {
+    if (!dbData) return [];
+    
+    let guests = dbData.guests || [];
+    const rawData = [
+      ...(dbData.dailyTransactions || []).map(tx => ({ ...tx, dbType: 'harian' })),
+      ...(dbData.activeKost || []).map(kos => ({ ...kos, dbType: 'kos' }))
+    ].sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput));
 
-        const rawData = [
-          ...(data.dailyTransactions || []).map(tx => ({ ...tx, dbType: 'harian' })),
-          ...(data.activeKost || []).map(kos => ({ ...kos, dbType: 'kos' }))
-        ].sort((a, b) => new Date(b.waktuInput) - new Date(a.waktuInput));
+    // Mapping riwayat transaksi ke setiap tamu
+    const guestsWithHistory = guests.map(g => {
+        const riwayat = rawData.filter(tx => tx.guestId === g.guestId || (tx.nama || '').toLowerCase().trim() === (g.nama || '').toLowerCase().trim());
+        return { ...g, totalKunjungan: riwayat.length, riwayatInap: riwayat };
+    });
 
-        if (!data.guests) {
-            const map = new Map();
-            rawData.forEach(item => {
-                const key = (item.nama || '').toLowerCase().trim();
-                if (!key) return;
-                
-                if (!map.has(key)) {
-                    map.set(key, {
-                        guestId: `GST-${Date.now()}-${Math.floor(Math.random()*10000)}`,
-                        nama: toTitleCase(item.nama),
-                        noTelp: item.noTelp || '',
-                        nik: item.nik || '',
-                        tanggalLahir: item.tanggalLahir || '',
-                        jenisKelamin: item.jenisKelamin || '',
-                        profesi: item.profesi || '',
-                        tamuDari: item.tamuDari || '',
-                        alamatKantor: item.alamatKantor || '',
-                        alamatLengkap: item.alamatLengkap || '',
-                        waktuDibuat: item.waktuInput || new Date().toISOString()
-                    });
-                } else {
-                    const existing = map.get(key);
-                    if (!existing.noTelp && item.noTelp) existing.noTelp = item.noTelp;
-                    if (!existing.nik && item.nik) existing.nik = item.nik;
-                    if (!existing.jenisKelamin && item.jenisKelamin) existing.jenisKelamin = item.jenisKelamin;
-                    if (!existing.alamatLengkap && item.alamatLengkap) existing.alamatLengkap = item.alamatLengkap;
-                }
-            });
-            guests = Array.from(map.values());
-            data.guests = guests;
-            
-            (data.dailyTransactions || []).forEach(tx => {
-                const key = (tx.nama || '').toLowerCase().trim();
-                if (map.has(key)) tx.guestId = map.get(key).guestId;
-            });
-            (data.activeKost || []).forEach(kos => {
-                const key = (kos.nama || '').toLowerCase().trim();
-                if (map.has(key)) kos.guestId = map.get(key).guestId;
-            });
-            
-            needSave = true;
-        }
-
-        const guestsWithHistory = guests.map(g => {
-            const riwayat = rawData.filter(tx => tx.guestId === g.guestId || (tx.nama || '').toLowerCase().trim() === (g.nama || '').toLowerCase().trim());
-            return { ...g, totalKunjungan: riwayat.length, riwayatInap: riwayat };
-        });
-
-        if (needSave) {
-            await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-        }
-
-        guestsWithHistory.sort((a, b) => {
-            const dateA = a.riwayatInap.length > 0 ? new Date(a.riwayatInap[0].waktuInput) : new Date(a.waktuDibuat);
-            const dateB = b.riwayatInap.length > 0 ? new Date(b.riwayatInap[0].waktuInput) : new Date(b.waktuDibuat);
-            return dateB - dateA;
-        });
-
-        setSemuaPelanggan(guestsWithHistory);
-      } catch (error) { console.error("Gagal mengambil data pelanggan:", error); } finally { setLoading(false); }
-    };
-    loadData();
-  }, [refreshTrigger]);
+    return guestsWithHistory;
+  }, [dbData]);
+  // [END: Memory Derived States]
 
   const openBerkasModal = (item) => {
     setEditingBerkas(item); 
     setEditForm({ ...item }); 
+    setEditTipeId(item.nik ? 'KTP' : (item.tipeIdLain || 'KTP'));
+    setEditNomorId(item.nik || item.nomorIdLain || '');
   };
 
   const handleSimpanBerkas = async () => {
+    // TAMBAHAN: Validasi panjang nomor telepon di Edit Form
+    if (editForm.noTelp && (editForm.noTelp.length < 8 && editForm.noTelp.length > 0 || editForm.noTelp.length > 15)) {
+      await alert("Nomor telepon harus berisi antara 8 hingga 15 angka.", "Validasi Gagal");
+      return;
+    }
+    
     setIsSaving(true);
     try {
-      const res = await fetch('http://localhost:5000/api/data');
-      const dbData = await res.json();
+      // Duplikasi memori global untuk dimutasi
+      const currentDb = JSON.parse(JSON.stringify(dbData));
 
-      const index = (dbData.guests || []).findIndex(g => g.guestId === editingBerkas.guestId);
-      if (index !== -1) {
-          dbData.guests[index] = { ...dbData.guests[index], ...editForm };
+      let finalDataToSave = { ...editForm };
+      if (editTipeId === 'KTP') {
+          finalDataToSave.nik = editNomorId;
+          finalDataToSave.tipeIdLain = '';
+          finalDataToSave.nomorIdLain = '';
       } else {
-          if(!dbData.guests) dbData.guests = [];
-          dbData.guests.push({...editForm});
+          finalDataToSave.nik = '';
+          finalDataToSave.tipeIdLain = editTipeId;
+          finalDataToSave.nomorIdLain = editNomorId;
       }
 
-      const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dbData) });
+      const index = (currentDb.guests || []).findIndex(g => g.guestId === editingBerkas.guestId);
+      if (index !== -1) {
+          currentDb.guests[index] = { ...currentDb.guests[index], ...finalDataToSave };
+      } else {
+          if(!currentDb.guests) currentDb.guests = [];
+          currentDb.guests.push({...finalDataToSave});
+      }
+
+      const postRes = await fetch('http://localhost:5000/api/data/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentDb) });
       const result = await postRes.json();
+      
       if (result.success) { 
+        refreshData(); // Sinkronkan memori global pasca simpan
         setEditingBerkas(null); 
-        setRefreshTrigger(prev => prev + 1); 
         toast("Biodata berhasil diperbarui!", "success");
       } 
       else { await alert("Gagal menyimpan berkas: " + result.error, "Error"); }
@@ -135,28 +99,60 @@ export default function DatabasePelanggan() {
     } finally { setIsSaving(false); }
   };
 
+  const requestSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
+    setSortConfig({ key, direction });
+  };
+  const getSortIndicator = (key) => sortConfig.key !== key ? '↕️' : (sortConfig.direction === 'asc' ? '⬆️' : '⬇️');
+
   const filteredPelanggan = semuaPelanggan.filter(p => 
     (p.nama && p.nama.toLowerCase().includes(searchTerm.toLowerCase())) || 
     (p.noTelp && p.noTelp.includes(searchTerm)) ||
-    (p.nik && p.nik.includes(searchTerm))
+    (p.nik && p.nik.includes(searchTerm)) ||
+    (p.nomorIdLain && p.nomorIdLain.includes(searchTerm))
   );
+
+  const sortedPelanggan = [...filteredPelanggan].sort((a, b) => {
+    let valA, valB;
+    switch(sortConfig.key) {
+        case 'nama': 
+            valA = (a.nama || '').toLowerCase(); 
+            valB = (b.nama || '').toLowerCase(); 
+            break;
+        case 'kunjungan': 
+            valA = a.totalKunjungan || 0; 
+            valB = b.totalKunjungan || 0; 
+            break;
+        default: {
+            const dateA = a.riwayatInap?.length > 0 ? new Date(a.riwayatInap[0].waktuInput).getTime() : new Date(a.waktuDibuat).getTime();
+            const dateB = b.riwayatInap?.length > 0 ? new Date(b.riwayatInap[0].waktuInput).getTime() : new Date(b.waktuDibuat).getTime();
+            valA = dateA; 
+            valB = dateB; 
+            break;
+        }
+    }
+    if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+    if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+    return 0;
+  });
 
   const filteredCities = DAFTAR_KOTA_INDONESIA.filter(kota => kota.toLowerCase().includes(citySearch.toLowerCase()));
   const totalCityPages = Math.ceil(filteredCities.length / 20) || 1;
   const paginatedCities = filteredCities.slice((cityPage - 1) * 20, cityPage * 20);
   const handleSelectCity = (kota) => { setEditForm({...editForm, tamuDari: kota}); setIsCityModalOpen(false); setCitySearch(''); setCityPage(1); };
 
-  if (loading) return <div className="text-center p-10 text-gray-500 italic">Memuat database pelanggan...</div>;
+  if (isDbLoading) return <div className="text-center p-10 font-medium text-gray-500">Memuat database pelanggan dari memori sentral...</div>;
 
   return (
     <div className="space-y-6 animate-fade-in pb-10">
       <div className="bg-white p-4 rounded-md shadow-sm border border-gray-200 flex flex-col md:flex-row justify-between items-center gap-4">
         <div>
           <h2 className="text-xl font-bold text-gray-800">👥 Database Pelanggan Terpadu</h2>
-          <p className="text-sm text-gray-500">Buku Register Tamu: Identitas Pribadi, KTP, dan Kontak.</p>
+          <p className="text-sm text-gray-500">Buku Register Tamu: Identitas Pribadi, ID Resmi, dan Kontak.</p>
         </div>
         <div className="w-full md:w-1/3">
-          <input type="text" placeholder="🔍 Cari Nama, NIK, atau No. Telepon..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full border border-gray-300 rounded-md p-3 bg-gray-50 focus:ring-2 focus:ring-blue-500 outline-none" />
+          <input type="text" placeholder="🔍 Cari Nama, ID, atau No. Telepon..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full border border-gray-300 rounded-md p-3 bg-gray-50 focus:ring-2 focus:ring-blue-500 outline-none" />
         </div>
       </div>
 
@@ -165,15 +161,25 @@ export default function DatabasePelanggan() {
           <table className="w-full text-sm text-left">
             <thead className="bg-gray-100 text-gray-700 border-b border-gray-300">
               <tr>
-                <th className="p-4 font-bold w-1/3">Nama Lengkap & Tipe</th>
+                <th className="p-4 font-bold w-1/3 hover:text-blue-600 cursor-pointer transition-colors" onClick={() => requestSort('nama')}>
+                   Nama Lengkap <span className="text-xs ml-1 opacity-60">{getSortIndicator('nama')}</span>
+                </th>
                 <th className="p-4 font-bold">Kontak Terhubung</th>
-                <th className="p-4 font-bold">Identitas KTP & Domisili</th>
-                <th className="p-4 font-bold text-center w-36">Pengaturan</th>
+                <th className="p-4 font-bold hover:text-blue-600 cursor-pointer transition-colors" onClick={() => requestSort('waktuDibuat')}>
+                   Identitas & Kedatangan <span className="text-xs ml-1 opacity-60">{getSortIndicator('waktuDibuat')}</span>
+                </th>
+                <th className="p-4 font-bold text-center w-36 hover:text-blue-600 cursor-pointer transition-colors" onClick={() => requestSort('kunjungan')}>
+                   Kunjungan <span className="text-xs ml-1 opacity-60">{getSortIndicator('kunjungan')}</span>
+                </th>
               </tr>
             </thead>
             <tbody>
-              {filteredPelanggan.length === 0 ? (<tr><td colSpan="4" className="p-8 text-center text-gray-500 italic">Tidak ada data pelanggan yang cocok.</td></tr>) : (
-                filteredPelanggan.map((p) => (
+              {sortedPelanggan.length === 0 ? (<tr><td colSpan="4" className="p-8 text-center text-gray-500 italic">Tidak ada data pelanggan yang cocok.</td></tr>) : (
+                sortedPelanggan.map((p) => {
+                  const idType = p.nik ? 'KTP' : (p.tipeIdLain || 'ID');
+                  const idNum = p.nik || p.nomorIdLain || '-';
+
+                  return (
                   <tr key={p.guestId} className="border-b border-gray-100 hover:bg-blue-50/30 transition-colors">
                     <td className="p-4">
                       <div className="font-bold text-gray-900 text-base">
@@ -181,20 +187,21 @@ export default function DatabasePelanggan() {
                       </div>
                       <div className="mt-1 flex flex-wrap gap-2">
                         <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-800 shadow-sm">ID: {p.guestId}</span>
-                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-100 text-purple-700 shadow-sm border border-purple-200">{p.totalKunjungan} Kunjungan</span>
                       </div>
                     </td>
                     <td className="p-4"><div className="flex items-center gap-2 mb-1"><span>📱</span> <span className="font-medium text-gray-800">{p.noTelp || <span className="text-gray-400 italic">Kosong</span>}</span></div></td>
                     <td className="p-4">
-                      <div className="font-mono text-xs text-gray-600 mb-1">NIK: <span className="font-bold text-gray-800">{p.nik || '-'}</span></div>
+                      <div className="font-mono text-xs text-gray-600 mb-1 font-bold">{idType}: <span className="text-gray-800">{idNum}</span></div>
                       <div className="text-xs text-gray-500 truncate max-w-[200px]">📍 {p.tamuDari || 'Kota Asal Kosong'}</div>
                       {p.alamatKantor && (<div className="text-[10px] text-gray-400 truncate max-w-[200px] mt-0.5">🏢 {p.alamatKantor}</div>)}
                     </td>
-                    <td className="p-4 text-center">
-                      <button onClick={() => openBerkasModal(p)} className="bg-blue-600 hover:bg-blue-700 text-white w-full py-2 rounded text-sm font-bold shadow-sm transition-colors">📄 Kelola Biodata</button>
+                    <td className="p-4 text-center space-y-2">
+                      <span className="inline-block px-3 py-1 rounded text-xs font-bold uppercase tracking-wider bg-purple-100 text-purple-700 shadow-sm border border-purple-200 block w-full">{p.totalKunjungan} Kali</span>
+                      <button onClick={() => openBerkasModal(p)} className="bg-blue-600 hover:bg-blue-700 text-white w-full py-2 rounded text-xs font-bold shadow-sm transition-colors">📄 Kelola Biodata</button>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -221,21 +228,24 @@ export default function DatabasePelanggan() {
                     <option value="" disabled hidden>- Pilih -</option><option value="Laki-laki">Laki-laki ♂️</option><option value="Perempuan">Perempuan ♀️</option><option value="Lain-lain">Lain-lain ⚪</option>
                   </select>
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 mb-1">NIK KTP (16 Digit)</label>
-                  <input type="text" value={editForm.nik || ''} onChange={(e) => setEditForm({...editForm, nik: e.target.value.replace(/[^0-9]/g, '')})} placeholder="357..." maxLength="16" className="w-full border border-gray-300 rounded p-2 text-sm font-mono outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"/>
+                
+                <div className="flex flex-col">
+                   <label className="block text-xs font-bold text-gray-700 mb-1">Identitas Resmi</label>
+                   <div className="flex gap-1 h-[36px]">
+                     <select value={editTipeId} onChange={(e) => setEditTipeId(e.target.value)} className="w-1/3 bg-gray-50 border border-gray-300 rounded-l p-1 text-xs font-bold outline-none focus:border-blue-500">
+                       <option value="KTP">KTP</option><option value="SIM">SIM</option><option value="PASPOR">Paspor</option>
+                     </select>
+                     <input type="text" value={editNomorId} onChange={(e) => setEditNomorId(e.target.value)} placeholder="Nomor ID..." className="w-2/3 border border-gray-300 rounded-r p-2 text-sm font-mono outline-none focus:ring-1 focus:ring-blue-500 shadow-sm" />
+                   </div>
                 </div>
+
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Tanggal Lahir</label>
-                  {/* REVISI: Menggunakan CustomDateTimePicker */}
-                  <CustomDateTimePicker 
-                    value={editForm.tanggalLahir || ''} 
-                    onChange={(val) => setEditForm({...editForm, tanggalLahir: val})} 
-                  />
+                  <CustomDateTimePicker value={editForm.tanggalLahir || ''} onChange={(val) => setEditForm({...editForm, tanggalLahir: val})} />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Nomor WhatsApp Aktif</label>
-                  <input type="text" value={editForm.noTelp || ''} onChange={(e) => setEditForm({...editForm, noTelp: e.target.value})} placeholder="0812..." className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"/>
+                  <input type="text" value={editForm.noTelp || ''} onChange={(e) => setEditForm({...editForm, noTelp: e.target.value.replace(/[^0-9+]/g, '')})} placeholder="0812..." className="w-full border border-gray-300 rounded p-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"/>
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Profesi / Pekerjaan</label>

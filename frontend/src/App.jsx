@@ -7,9 +7,11 @@ import DashboardKamar from './components/DashboardKamar';
 import FormCheckIn from './components/FormCheckIn';
 import LaporanFinansial from './components/LaporanFinansial';
 import DialogProvider from './components/DialogProvider';
+import { DataProvider } from './context/DataProvider';
+import InHouseFolio from './components/InHouseFolio';
+import Housekeeping from './components/Housekeeping';
 
 function AppContent() {
-  // Menambahkan state tab baru untuk laporan dan pengaturan
   const [activeTab, setActiveTab] = useState('harian');
 
   return (
@@ -32,7 +34,6 @@ function AppContent() {
               </div>
             </div>
 
-            {/* Tombol Pengaturan kini mengubah Tab Utama */}
             <button 
               onClick={() => setActiveTab('pengaturan')} 
               className={`group flex items-center gap-2 border-2 px-5 py-2 rounded-full font-bold transition-all duration-300 shadow-sm active:scale-95 ${activeTab === 'pengaturan' ? 'bg-[#1a4b1a] text-white border-[#1a4b1a]' : 'bg-white border-gray-100 hover:border-[#1a4b1a] text-gray-600 hover:text-[#1a4b1a]'}`}
@@ -56,7 +57,9 @@ function AppContent() {
         <div className="flex flex-wrap justify-center sm:justify-start gap-3 print:hidden">
           {[
             { id: 'harian', icon: '🛎️', label: 'Penerimaan Tamu' }, 
-            { id: 'riwayat', icon: '🏨', label: 'Riwayat Transaksi' },
+            { id: 'inhouse', icon: '🛏️', label: 'In-House Folio' },
+            { id: 'housekeeping', icon: '🧹', label: 'Housekeeping' },
+            { id: 'riwayat', icon: '📖', label: 'Log Riwayat' },
             { id: 'pelanggan', icon: '👥', label: 'Data Pelanggan' },
             { id: 'laporan', icon: '📈', label: 'Laporan Finansial' }
           ].map((tab) => (
@@ -78,6 +81,8 @@ function AppContent() {
         {/* WADAH KONTEN UTAMA */}
         <div className="bg-white p-6 sm:p-8 rounded-[2rem] shadow-xl shadow-gray-200/50 border border-gray-100 min-h-[500px] transition-all duration-500 print:p-0 print:shadow-none print:border-none print:bg-transparent print:min-h-0">
           {activeTab === 'harian' && <FormCheckIn />}
+          {activeTab === 'inhouse' && <InHouseFolio />}
+          {activeTab === 'housekeeping' && <Housekeeping />}
           {activeTab === 'riwayat' && <RiwayatTransaksi />}
           {activeTab === 'pelanggan' && <DatabasePelanggan />}
           {activeTab === 'laporan' && <LaporanFinansial />}
@@ -93,7 +98,10 @@ function AppContent() {
 function App() {
   return (
     <DialogProvider>
-      <AppContent />
+      {/* BUNGKUS APLIKASI DENGAN DATA PROVIDER GLOBAL */}
+      <DataProvider>
+        <AppContent />
+      </DataProvider>
     </DialogProvider>
   );
 }
