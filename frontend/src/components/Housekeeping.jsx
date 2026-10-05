@@ -4,6 +4,8 @@ import { format } from 'date-fns';
 import { useDialog } from './DialogProvider';
 import { useAppData } from '../context/DataProvider';
 
+const generateTimestamp = () => Date.now();
+
 export default function Housekeeping() {
   const { alert, toast, prompt } = useDialog();
   const { data: dbData, loading: isDbLoading, refreshData } = useAppData();
@@ -13,6 +15,7 @@ export default function Housekeeping() {
 
     const s = dbData.settings || {};
     const statuses = dbData.roomStatuses || {};
+    
     const rHour = parseInt((s.rolloverTime || '12:00').split(':')[0], 10);
     const now = new Date();
     
@@ -40,25 +43,46 @@ export default function Housekeeping() {
 
   const handleOpenModal = (roomNo) => {
     const info = getStatusInfo(roomNo);
-    // Saat modal dibuka, targetStatus default-nya sama dengan status saat ini
     setModal({ isOpen: true, roomNo, targetStatus: info.status, note: info.note || '' });
   };
 
-  // [START: HandleSimpanStatus]
   const handleSimpanStatus = async () => {
-    let finalNote = modal.note;
-
-    // LOGIKA AUDIT TRAIL PIC
-    // Jika status diubah menjadi Sedang Dibersihkan, minta nama petugas
     const dbStatus = getStatusInfo(modal.roomNo).status;
+    let finalNote = modal.note;
+    let logPayload = null;
+
+    // LOGIKA AUDIT TRAIL PIC (Lapis 1: Cleaner & Lapis 2: Checker)
+    // BUG FIX: Menggunakan string 'Dibersihkan' secara konsisten
     if (modal.targetStatus === 'Dibersihkan' && dbStatus !== 'Dibersihkan') {
-      const picName = await prompt("Masukkan nama Petugas HK yang membersihkan kamar ini:", "Pencatatan Log Pembersihan");
-      if (!picName) return; // Batalkan proses jika nama tidak diisi
+      const jenisPembersihan = dbStatus === 'Minta Dibersihkan' ? 'MUR' : 'Rutin';
+      const picName = await prompt(`Masukkan nama Petugas (Cleaner) untuk pembersihan ${jenisPembersihan}:`, "Log Mulai Pembersihan");
+      
+      if (!picName) return; 
       
       const timeStr = format(new Date(), 'dd/MM/yy HH:mm');
-      const actionLog = `[Dibersihkan oleh: ${picName.trim()} pada ${timeStr}]`;
+      const actionLog = `[Dibersihkan (${jenisPembersihan}) oleh: ${picName.trim()} pada ${timeStr}]`;
+      
+      logPayload = { 
+        id: generateTimestamp(), 
+        kamar: modal.roomNo, 
+        aksi: `Mulai Membersihkan (${jenisPembersihan})`, 
+        petugas: picName.trim(), 
+        waktu: new Date().toISOString() 
+      };
+
       finalNote = finalNote ? `${finalNote} | ${actionLog}` : actionLog;
-      setModal(prev => ({ ...prev, note: finalNote })); // Update UI State
+    } 
+    else if (modal.targetStatus === 'Bersih' && dbStatus !== 'Bersih') {
+      const checkerName = await prompt("Masukkan nama Penanggung Jawab (Checker) yang memverifikasi:", "Log Verifikasi Kamar");
+      if (!checkerName) return;
+
+      logPayload = { 
+        id: generateTimestamp(), 
+        kamar: modal.roomNo, 
+        aksi: 'Verifikasi Selesai/Bersih', 
+        petugas: checkerName.trim(), 
+        waktu: new Date().toISOString() 
+      };
     }
 
     setIsSaving(true);
@@ -66,10 +90,8 @@ export default function Housekeeping() {
       const currentDb = JSON.parse(JSON.stringify(dbData));
       if (!currentDb.roomStatuses) currentDb.roomStatuses = {};
 
-      // AUTO CLEAR NOTE
-      // Jika kamar sudah kembali 'Bersih', bersihkan seluruh log dan catatan
       if (modal.targetStatus === 'Bersih') {
-        finalNote = '';
+        finalNote = ''; 
       }
 
       currentDb.roomStatuses[modal.roomNo] = {
@@ -86,8 +108,21 @@ export default function Housekeeping() {
       
       const result = await res.json();
       if (result.success) {
+        
+        if (logPayload) {
+          try {
+            await fetch('http://localhost:5000/api/hk-logs/save', {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify(logPayload)
+            });
+          } catch (logErr) {
+            console.warn("Peringatan: Gagal menyimpan log HK ke file terpisah", logErr);
+          }
+        }
+
         refreshData();
-        toast(`Status Kamar #${modal.roomNo} menjadi ${modal.targetStatus}.`, "success");
+        toast(`Status Kamar #${modal.roomNo} menjadi ${modal.targetStatus === 'Dibersihkan' ? 'Sedang Dibersihkan' : modal.targetStatus}.`, "success");
         setModal({ isOpen: false, roomNo: '', targetStatus: 'Bersih', note: '' });
       } else {
         await alert("Gagal menyimpan data status.", "Error Simpan");
@@ -99,7 +134,6 @@ export default function Housekeeping() {
       setIsSaving(false);
     }
   };
-  // [END: HandleSimpanStatus]
 
   const stats = { Total: 0, Bersih: 0, Kotor: 0, Dibersihkan: 0, 'Minta Dibersihkan': 0, Rusak: 0, 'In-House': activeRooms.length };
 
@@ -136,7 +170,6 @@ export default function Housekeeping() {
 
   if (isDbLoading) return <div className="text-center p-10 font-medium text-gray-500">Memuat status kebersihan kamar...</div>;
 
-  // Variabel untuk Modal Logika Transisi Ketat
   const dbStatus = modal.isOpen ? getStatusInfo(modal.roomNo).status : '';
   const isOccupied = modal.isOpen ? activeRooms.includes(modal.roomNo) : false;
 
@@ -182,7 +215,7 @@ export default function Housekeeping() {
         </div>
         
         <div onClick={() => setFilter('Rusak')} className={`p-3 rounded-xl border cursor-pointer transition-all flex flex-col justify-between ${filter === 'Rusak' ? 'bg-gray-600 text-white shadow-md border-gray-600' : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'}`}>
-          <div className="text-[10px] sm:text-xs font-bold uppercase tracking-wider mb-1 flex justify-between">OOO / Rusak <span>⚠️</span></div>
+          <div className="text-[10px] sm:text-xs font-bold uppercase tracking-wider mb-1 flex justify-between">OOO / Rusak <span>⚠️️</span></div>
           <div className="text-2xl sm:text-3xl font-black">{stats.Rusak}</div>
         </div>
       </div>
@@ -224,7 +257,7 @@ export default function Housekeeping() {
                         
                         <span className="text-3xl mb-1 drop-shadow-sm opacity-80 z-10">{getStatusIcon(info.status)}</span>
                         <span className="text-2xl font-black tracking-tight z-10">{roomNo}</span>
-                        <span className="text-[10px] font-extrabold uppercase mt-1 tracking-widest opacity-80 bg-white/70 px-2 py-0.5 rounded shadow-sm z-10">{info.status}</span>
+                        <span className="text-[10px] font-extrabold uppercase mt-1 tracking-widest opacity-80 bg-white/70 px-2 py-0.5 rounded shadow-sm z-10">{info.status === 'Dibersihkan' ? 'SDG DIBERSIHKAN' : info.status}</span>
                         
                         {info.note && (
                           <div className="absolute bottom-[calc(100%+5px)] left-1/2 -translate-x-1/2 hidden group-hover:block w-36 bg-gray-800 text-white text-[10px] p-2.5 rounded-lg shadow-xl z-50 text-center pointer-events-none">
@@ -256,7 +289,7 @@ export default function Housekeeping() {
               <div className="bg-white border border-gray-200 p-3 rounded-lg flex items-center justify-between shadow-sm">
                  <span className="text-xs font-bold text-gray-500 uppercase">Status Saat Ini:</span>
                  <span className={`text-xs font-bold px-2 py-1 rounded border ${getStatusColor(dbStatus).bg} ${getStatusColor(dbStatus).text} ${getStatusColor(dbStatus).border}`}>
-                   {getStatusIcon(dbStatus)} {dbStatus}
+                   {getStatusIcon(dbStatus)} {dbStatus === 'Dibersihkan' ? 'Sedang Dibersihkan' : dbStatus}
                  </span>
               </div>
 
@@ -264,32 +297,25 @@ export default function Housekeeping() {
                 <label className="block text-xs font-bold text-gray-600 uppercase mb-2">Pilih Aksi Selanjutnya</label>
                 <div className="grid grid-cols-2 gap-2">
                   
-                  {/* LOGIKA TRANSISI KETAT (Strict SOP) */}
-                  {/* Kamar bisa jadi BERSIH hanya jika sebelumnya sedang dibersihkan, kotor, atau rusak */}
-                  {(dbStatus === 'Sedang Dibersihkan' || dbStatus === 'Kotor' || dbStatus === 'Rusak') && (
+                  {(dbStatus === 'Dibersihkan' || dbStatus === 'Kotor' || dbStatus === 'Rusak') && (
                     <button onClick={() => setModal({...modal, targetStatus: 'Bersih'})} className={`py-2 px-3 rounded-lg text-sm font-bold border-2 transition-colors ${modal.targetStatus === 'Bersih' ? 'bg-green-100 border-green-500 text-green-800' : 'bg-white border-gray-200 text-gray-500 hover:border-green-300'}`}>✨ Tandai Bersih</button>
                   )}
 
-                  {/* Kamar bisa KOTOR/MUR hanya jika sebelumnya BERSIH atau RUSAK */}
                   {(dbStatus === 'Bersih' || dbStatus === 'Rusak') && (
                     <>
                       <button onClick={() => setModal({...modal, targetStatus: 'Kotor'})} className={`py-2 px-3 rounded-lg text-sm font-bold border-2 transition-colors ${modal.targetStatus === 'Kotor' ? 'bg-red-100 border-red-500 text-red-800' : 'bg-white border-gray-200 text-gray-500 hover:border-red-300'}`}>🧹 Kotor</button>
-                      
-                      {/* Make Up Room khusus In-House */}
                       {isOccupied && (
                         <button onClick={() => setModal({...modal, targetStatus: 'Minta Dibersihkan'})} className={`py-2 px-3 rounded-lg text-[11px] leading-tight font-bold border-2 transition-colors ${modal.targetStatus === 'Minta Dibersihkan' ? 'bg-purple-100 border-purple-500 text-purple-800' : 'bg-white border-gray-200 text-gray-500 hover:border-purple-300'}`}>🔔 Minta Dibersihkan <br/>(Make Up Room)</button>
                       )}
                     </>
                   )}
 
-                  {/* Kamar bisa SEDANG DIBERSIHKAN hanya jika sebelumnya KOTOR, MUR, atau RUSAK */}
                   {(dbStatus === 'Kotor' || dbStatus === 'Minta Dibersihkan' || dbStatus === 'Rusak') && (
-                    <button onClick={() => setModal({...modal, targetStatus: 'Sedang Dibersihkan'})} className={`py-2 px-3 rounded-lg text-sm font-bold border-2 transition-colors ${modal.targetStatus === 'Sedang Dibersihkan' ? 'bg-yellow-100 border-yellow-500 text-yellow-800' : 'bg-white border-gray-200 text-gray-500 hover:border-yellow-300'}`}>⏳ Sedang Dibersihkan</button>
+                    <button onClick={() => setModal({...modal, targetStatus: 'Dibersihkan'})} className={`py-2 px-3 rounded-lg text-sm font-bold border-2 transition-colors ${modal.targetStatus === 'Dibersihkan' ? 'bg-yellow-100 border-yellow-500 text-yellow-800' : 'bg-white border-gray-200 text-gray-500 hover:border-yellow-300'}`}>⏳ Sedang Dibersihkan</button>
                   )}
 
-                  {/* Kamar bisa RUSAK dari status apapun KECUALI sudah Rusak */}
                   {dbStatus !== 'Rusak' && (
-                    <button onClick={() => setModal({...modal, targetStatus: 'Rusak'})} className={`py-2 px-3 rounded-lg text-sm font-bold border-2 transition-colors ${modal.targetStatus === 'Rusak' ? 'bg-gray-200 border-gray-500 text-gray-800' : 'bg-white border-gray-200 text-gray-500 hover:border-gray-400'}`}>⚠️ Rusak (OOO)</button>
+                    <button onClick={() => setModal({...modal, targetStatus: 'Rusak'})} className={`py-2 px-3 rounded-lg text-sm font-bold border-2 transition-colors ${modal.targetStatus === 'Rusak' ? 'bg-gray-200 border-gray-500 text-gray-800' : 'bg-white border-gray-200 text-gray-500 hover:border-gray-400'}`}>⚠️️ Rusak (OOO)</button>
                   )}
 
                 </div>
@@ -301,7 +327,7 @@ export default function Housekeeping() {
                   rows="3" 
                   value={modal.note} 
                   onChange={(e) => setModal({...modal, note: e.target.value})} 
-                  placeholder="Opsional. Catatan akan otomatis terhapus saat kamar berstatus Bersih." 
+                  placeholder="Opsional. Catatan otomatis terhapus saat diverifikasi Bersih." 
                   className="w-full border border-gray-300 rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
                 />
               </div>

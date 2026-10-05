@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3] - 2026-10-05
+
+Memulai pengembangan V2 dengan navigasi baru, POS restoran dasar, dan audit Housekeeping berlapis.
+
+### Perubahan utama
+
+- Merombak navigasi menjadi sidebar responsif dengan pengelompokan Front Office, Operasional, dan Manajemen; dashboard kamar hanya tampil pada modul yang relevan.
+- Menambahkan POS restoran untuk pesanan Dine-In, Room Service, dan Takeaway, termasuk keranjang kuantitas dan pembayaran.
+- Mengintegrasikan tagihan Room Service ke folio kamar sebagai tagihan belum lunas.
+- Menambahkan pencatatan PIC Cleaner dan Checker Housekeeping ke log terpisah.
+- Menambahkan klasifikasi pembersihan rutin atau MUR pada alur Housekeeping.
+
 ## [0.1.2] - 2026-10-01
 
 Penyelesaian alur operasional Front Office V1 dengan modul Housekeeping, In-House Folio, dan peningkatan performa penyimpanan.

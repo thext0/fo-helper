@@ -142,6 +142,29 @@ app.post('/api/data/save', (req, res) => {
 });
 // [END: API Endpoints]
 
+// [START: HKLogsBackend]
+// Endpoint khusus untuk mencatat log Housekeeping ke file terpisah
+app.post('/api/hk-logs/save', (req, res) => {
+    try {
+        const logData = req.body;
+        const filePath = path.join(__dirname, 'data', 'hk_logs.json');
+        
+        let logs = [];
+        if (fs.existsSync(filePath)) {
+            logs = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        }
+        
+        logs.push(logData);
+        fs.writeFileSync(filePath, JSON.stringify(logs, null, 2));
+        
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Gagal menyimpan log HK:", error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// [END: HKLogsBackend]
+
 loadDatabase().then(() => {
     app.listen(PORT, () => {
         console.log(`🚀 FO Helper Backend berjalan di http://localhost:${PORT}`);
